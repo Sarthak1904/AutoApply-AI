@@ -60,6 +60,24 @@ Add your screenshots here when ready:
 - Supports light, dark, and system themes across the dashboard and extension
 - Works with major ATS platforms and falls back to generic form detection
 
+## How it works
+
+```mermaid
+flowchart LR
+    A["Job application page"] --> B["Browser extension<br/>captures fields and job context"]
+    B --> C["Local AutoApply service"]
+    C --> D{"Can AutoApply<br/>resolve it locally?"}
+    D -->|"Yes"| E["Profile, resume,<br/>policies and approved answers"]
+    D -->|"No"| F["Your chosen AI model<br/>Gemini or OpenRouter"]
+    E --> G["Prepared application review"]
+    F --> G
+    G --> H["Fill only, fill next,<br/>or AutoPilot"]
+    H --> I["You review and submit"]
+    I --> J["Track receipt and follow-ups<br/>in the local workspace"]
+```
+
+Known details stay on the local path. Only unresolved fields are sent to the AI provider you configure, and every route ends with your review before submission.
+
 ## AI model support
 
 AutoApply currently provides two provider integrations:
@@ -159,3 +177,10 @@ tests/               Backend and browser safety tests
 ## License
 
 [MIT](LICENSE)
+
+---
+
+<p align="center">
+  <strong>Built with ❤️ and way too many job applications.</strong><br>
+  <sub>If AutoApply saved you time, consider giving it a ⭐</sub>
+</p>
