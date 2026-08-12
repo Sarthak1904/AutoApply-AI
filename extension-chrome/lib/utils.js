@@ -50,6 +50,16 @@ const AutoApplyUtils = (() => {
   }
 
   /**
+   * Call an optional workspace endpoint. Workspace data is local user state
+   * (opportunities, packets, resume versions, teaches, and receipts), so a
+   * workspace failure must never stop ordinary autofill.
+   */
+  async function workspaceCall(endpoint, method = 'GET', body = null) {
+    const normalized = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+    return apiCall(`/api/workspace${normalized}`, method, body);
+  }
+
+  /**
    * Debounce a function.
    * @param {Function} fn - Function to debounce
    * @param {number} ms - Delay in milliseconds
@@ -193,7 +203,7 @@ const AutoApplyUtils = (() => {
       .replace(/'/g, '&#039;');
   }
 
-  return { API_BASE, apiCall, debounce, generateId, detectPlatform, extractCompany, escapeHTML };
+  return { API_BASE, apiCall, workspaceCall, debounce, generateId, detectPlatform, extractCompany, escapeHTML };
 })();
 
 // Make available globally for other content scripts

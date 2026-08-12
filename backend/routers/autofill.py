@@ -4,13 +4,16 @@ import json
 import logging
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Body
+from fastapi import APIRouter, HTTPException
 
 from backend.models.profile import UserProfile
 from backend.models.form_schema import FormSchema, FillResponse, FitScore
 from backend.models.application import Correction, AnswerBankEntry
+from backend.models.requests import CoverLetterRequest, JobDescriptionRequest
 from backend.services.field_mapper import FieldMapper
+from backend.services.local_mapper import LocalFieldMapper
 from backend.services.job_analyzer import JobAnalyzer
 from backend.services.answer_generator import AnswerGenerator
 from backend.services.database import get_database
@@ -69,7 +72,7 @@ def autofill(form_schema: FormSchema):
     """Generate fill instructions for a form schema.
 
     Takes the extracted form fields + job description, loads the user's profile,
-    knowledge file, and past corrections, then uses Gemini to generate
+    knowledge file, and past corrections, then uses the configured provider to generate
     intelligent fill instructions with confidence levels.
     """
     profile = _load_profile()
@@ -82,13 +85,60 @@ def autofill(form_schema: FormSchema):
     knowledge = _load_knowledge()
     corrections = _load_corrections()
 
-    # Generate fill instructions
-    mapper = FieldMapper()
-    response = mapper.map_fields(
+    # Resolve direct facts, policies, learned mappings, uploads, and approved
+    # vault answers locally.  Only genuinely unresolved fields need an AI call.
+    db = get_database()
+    policies = db.get_field_policies() if hasattr(db, "get_field_policies") else []
+    learned = db.get_learned_mappings() if hasattr(db, "get_learned_mappings") else []
+    vault_answers = db.list_answer_vault(500) if hasattr(db, "list_answer_vault") else []
+    if not isinstance(vault_answers, list):
+        vault_answers = []
+    answers = [*vault_answers, *db.get_answers()]
+    local = LocalFieldMapper.map_fields(
         form_schema=form_schema,
         profile=profile,
-        knowledge=knowledge,
-        corrections=corrections,
+        policies=policies,
+        learned_mappings=learned,
+        answer_entries=answers,
+    )
+
+    ai_instructions = []
+    if local.unresolved:
+        unresolved_schema = form_schema.model_copy(update={"fields": local.unresolved})
+        ai_response = FieldMapper.map_fields(
+            form_schema=unresolved_schema,
+            profile=profile,
+            knowledge=knowledge,
+            corrections=corrections,
+        )
+        ai_instructions = ai_response.instructions
+
+    by_field = {
+        instruction.field_id: instruction
+        for instruction in [*local.instructions, *ai_instructions]
+    }
+    ordered = []
+    for field in form_schema.fields:
+        instruction = by_field.get(field.id)
+        if instruction is None:
+            continue
+        source = (instruction.source or "").casefold()
+        review_required = (
+            instruction.action == "skip"
+            or instruction.confidence != "high"
+            or source.startswith("policy")
+            or source.startswith("answer_vault")
+        )
+        ordered.append(instruction.model_copy(update={"review_required": review_required}))
+    skipped_count = sum(1 for instruction in ordered if instruction.action == "skip")
+    review_count = sum(1 for instruction in ordered if instruction.review_required)
+    response = FillResponse(
+        instructions=ordered,
+        local_count=len(local.instructions),
+        ai_count=len(ai_instructions),
+        review_count=review_count,
+        ready_count=sum(1 for instruction in ordered if not instruction.review_required),
+        skipped_count=skipped_count,
     )
 
     # Save any generated text answers to the answer bank
@@ -102,18 +152,13 @@ def autofill(form_schema: FormSchema):
 
 
 @router.post("/analyze-job", response_model=FitScore)
-def analyze_job(body: dict = Body(...)):
+def analyze_job(body: JobDescriptionRequest):
     """Analyze a job description and return a fit score.
 
     Compares the job description against the user's profile to determine
     match quality, missing skills, and a recommendation.
     """
-    job_description = body.get("job_description", "")
-    if not job_description:
-        raise HTTPException(
-            status_code=400,
-            detail="job_description is required",
-        )
+    job_description = body.job_description
 
     profile = _load_profile()
     if not profile:
@@ -143,10 +188,19 @@ def log_correction(correction: Correction):
     """
     db = get_database()
     total = db.add_correction(correction.model_dump())
+    if hasattr(db, "upsert_learned_mapping"):
+        db.upsert_learned_mapping(
+            {
+                "field_label": correction.field_label,
+                "value": correction.user_value,
+                "agent_value": correction.agent_value,
+                "context": correction.context,
+                "url": correction.url,
+            }
+        )
 
     logger.info(
-        f"Correction logged: '{correction.field_label}' "
-        f"'{correction.agent_value}' -> '{correction.user_value}'"
+        "Correction logged for field '%s'", correction.field_label[:80]
     )
 
     return {"status": "success", "total_corrections": total}
@@ -160,11 +214,11 @@ def get_answer_bank():
 
 
 @router.post("/cover-letter")
-def generate_cover_letter(body: dict = Body(...)):
+def generate_cover_letter(body: CoverLetterRequest):
     """Generate a tailored cover letter."""
-    job_description = body.get("job_description", "")
-    company = body.get("company", "")
-    role = body.get("role", "")
+    job_description = body.job_description
+    company = body.company
+    role = body.role
     
     profile = _load_profile()
     if not profile:
@@ -183,14 +237,9 @@ def generate_cover_letter(body: dict = Body(...)):
 
 
 @router.post("/tailor-resume")
-def tailor_resume(body: dict = Body(...)):
+def tailor_resume(body: JobDescriptionRequest):
     """Generate JD-tailored resume suggestions."""
-    job_description = body.get("job_description", "")
-    if not job_description:
-        raise HTTPException(
-            status_code=400,
-            detail="job_description is required",
-        )
+    job_description = body.job_description
     
     profile = _load_profile()
     if not profile:
@@ -242,6 +291,16 @@ def _save_generated_answers(
                     answer=instruction.value,
                 )
                 db.add_answer(entry.model_dump())
+                if hasattr(db, "upsert_answer_vault"):
+                    db.upsert_answer_vault(
+                        {
+                            "id": str(uuid4()),
+                            **entry.model_dump(),
+                            "tags": [question_type],
+                            "source": "generated",
+                            "approved": False,
+                        }
+                    )
 
 
 def _extract_company(url: str, title: str) -> str:

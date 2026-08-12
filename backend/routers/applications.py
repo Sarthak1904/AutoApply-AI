@@ -9,7 +9,12 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from backend.models.application import Application, DuplicateCheckResult
+from backend.models.application import (
+    Application,
+    ApplicationStatus,
+    ApplicationStatusUpdate,
+    DuplicateCheckResult,
+)
 from backend.services.database import get_database
 
 logger = logging.getLogger(__name__)
@@ -19,13 +24,13 @@ router = APIRouter(prefix="/api/applications", tags=["applications"])
 @router.get("/")
 async def list_applications(
     limit: int = Query(default=50, ge=1, le=500),
-    status: Optional[str] = Query(default=None),
+    status: Optional[ApplicationStatus] = Query(default=None),
 ):
     """List all tracked applications.
 
     Args:
         limit: Maximum number of applications to return (most recent first).
-        status: Filter by status (applied, interview, rejected, offer, withdrawn).
+        status: Filter by lifecycle status.
     """
     db = get_database()
     apps = db.get_applications(limit=limit, status=status)
@@ -95,28 +100,23 @@ async def check_duplicate(
 
 
 @router.put("/{app_id}/status")
-async def update_status(app_id: str, body: dict):
+async def update_status(app_id: str, body: ApplicationStatusUpdate):
     """Update the status of an application.
 
     Args:
         app_id: The application ID to update.
         body: JSON body with 'status' and optional 'notes'.
     """
-    new_status = body.get("status")
-    if new_status not in ("applied", "interview", "rejected", "offer", "withdrawn"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid status: {new_status}",
-        )
-
     db = get_database()
-    notes = body.get("notes")
-    found = db.update_application_status(app_id, new_status, notes)
+    found = db.update_application_status(app_id, body.status, body.notes)
 
     if not found:
         raise HTTPException(status_code=404, detail=f"Application {app_id} not found")
 
-    return {"status": "success", "message": f"Application {app_id} updated to {new_status}"}
+    return {
+        "status": "success",
+        "message": f"Application {app_id} updated to {body.status}",
+    }
 
 
 @router.get("/export")
@@ -142,7 +142,7 @@ async def export_applications():
     writer.writeheader()
     for app in apps:
         writer.writerow(
-            {
+            {key: _csv_safe(value) for key, value in {
                 "applied_at": app.get("applied_at", ""),
                 "company": app.get("company", ""),
                 "role": app.get("role", ""),
@@ -151,7 +151,7 @@ async def export_applications():
                 "status": app.get("status", ""),
                 "url": app.get("url", ""),
                 "notes": app.get("notes", ""),
-            }
+            }.items()}
         )
 
     output.seek(0)
@@ -172,3 +172,12 @@ def _normalize_url(url: str) -> str:
     # Keep scheme, host, and path; strip query and fragment
     normalized = f"{parsed.scheme}://{hostname}{parsed.path}".rstrip("/").lower()
     return normalized
+
+
+def _csv_safe(value: object) -> object:
+    """Prevent spreadsheet programs from interpreting exported text as formulas."""
+    if not isinstance(value, str):
+        return value
+    if value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value

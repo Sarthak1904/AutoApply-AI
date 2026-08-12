@@ -15,6 +15,50 @@ let extensionState = {
   todayCount: 0
 };
 
+const MAX_RESUME_BYTES = 10 * 1024 * 1024;
+
+function bytesToBase64(bytes) {
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function fileNameFromDisposition(value) {
+  const match = /filename\*?=(?:UTF-8''|\")?([^\";]+)/i.exec(value || '');
+  if (!match) return 'resume.pdf';
+  try {
+    return decodeURIComponent(match[1].replace(/\"/g, '')).replace(/[\\/]/g, '_');
+  } catch (_) {
+    return 'resume.pdf';
+  }
+}
+
+async function fetchResumeVersion(versionId) {
+  if (typeof versionId !== 'string' || !versionId.trim()) {
+    throw new Error('Choose a resume version before attaching it.');
+  }
+  const response = await fetch(
+    `http://localhost:8000/api/workspace/resume-versions/${encodeURIComponent(versionId)}/download`,
+    { signal: AbortSignal.timeout(30000) }
+  );
+  if (!response.ok) throw new Error(`Resume download failed (${response.status}).`);
+  const contentLength = Number(response.headers.get('content-length') || 0);
+  if (contentLength > MAX_RESUME_BYTES) throw new Error('Selected resume is larger than 10MB.');
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (!bytes.length || bytes.length > MAX_RESUME_BYTES) {
+    throw new Error('Selected resume is empty or larger than 10MB.');
+  }
+  return {
+    base64: bytesToBase64(bytes),
+    filename: fileNameFromDisposition(response.headers.get('content-disposition')),
+    contentType: response.headers.get('content-type') || 'application/pdf',
+    size: bytes.length,
+  };
+}
+
 function showNotification(title, message) {
   browser.notifications.create({
     type: 'basic',
@@ -93,6 +137,26 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       
     return true; // Keep connection open
+  }
+
+  if (message.type === 'FETCH_RESUME_VERSION') {
+    fetchResumeVersion(message.version_id)
+      .then((file) => sendResponse({ status: 'success', file }))
+      .catch((err) => sendResponse({ status: 'error', error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'OPEN_WORKSPACE_RECORD') {
+    const opportunityId = String(message.opportunity_id || '').trim();
+    if (!opportunityId) {
+      sendResponse({ status: 'error', error: 'Missing opportunity ID.' });
+      return false;
+    }
+    const url = `http://localhost:8000/dashboard?application=${encodeURIComponent(opportunityId)}#applications`;
+    browser.tabs.create({ url })
+      .then(() => sendResponse({ status: 'success' }))
+      .catch((err) => sendResponse({ status: 'error', error: err.message }));
+    return true;
   }
 
   if (message.type === 'API_CALL_PROXY') {

@@ -42,7 +42,7 @@
   let preparationSummary = { ready_count: 0, review_count: 0, skipped_count: 0 };
   const THEME_KEY = 'autoapply_theme';
   const themeChoices = new Set(['system', 'light', 'dark']);
-  const BRAND_MARK = `<span class="autoapply-logo-icon" aria-hidden="true"><svg viewBox="0 0 48 48" focusable="false"><rect x="1" y="1" width="46" height="46" rx="12" fill="#17213A" stroke="#34425E" stroke-width="2"/><path d="M9 7h24l7 7v27H9z" fill="#526CE7"/><path d="M33 7v7h7z" fill="#DDE3FA"/><path d="M13 12v24" stroke="#F47D68" stroke-width="4" stroke-linecap="round"/><path d="M17.5 34 24 15l6.7 19M20.3 27h7.5" fill="none" stroke="#FFFDF8" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/><path d="m25.5 27.5 3.2 3.2 6.7-8" fill="none" stroke="#55C5B2" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`;
+  const BRAND_MARK = `<span class="autoapply-logo-icon" aria-hidden="true"><svg viewBox="0 0 48 48" focusable="false"><path d="M7 2h26l13 13v26a5 5 0 0 1-5 5H7a5 5 0 0 1-5-5V7a5 5 0 0 1 5-5Z" fill="#17213A" stroke="#344664" stroke-width="2"/><path d="M33 2v10a3 3 0 0 0 3 3h10Z" fill="#526CE7"/><path d="M10 11v26" stroke="#F47D68" stroke-width="4" stroke-linecap="round"/><path d="M20 14v9h12v11" fill="none" stroke="#91A4FF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="20" cy="14" r="4" fill="#FFFDF8"/><circle cx="32" cy="23" r="4" fill="#526CE7" stroke="#FFFDF8" stroke-width="2"/><circle cx="32" cy="34" r="4" fill="#52BFAE"/></svg></span>`;
   const colorScheme = window.matchMedia('(prefers-color-scheme: dark)');
   let themePreference = 'system';
   const MAX_AUTOPILOT_STEPS = 15;

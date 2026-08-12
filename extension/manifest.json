@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "AutoApply",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "AI-powered job application autofill agent - scrapes forms, maps your profile, fills intelligently.",
   "permissions": [
     "activeTab",

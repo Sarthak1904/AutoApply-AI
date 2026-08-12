@@ -1,7 +1,7 @@
 """Cover letter generation service."""
 import logging
 from backend.models.profile import UserProfile
-from backend.services.gemini import get_gemini_client
+from backend.services.llm_client import get_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,7 @@ class CoverLetterGenerator:
         profile: UserProfile,
         knowledge: str = "",
     ) -> str:
-        client = get_gemini_client()
+        client = get_llm_client()
         
         system_instruction = (
             "You write cover letters that sound like a real person wrote them. "

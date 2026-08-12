@@ -1,7 +1,7 @@
 """Resume tailoring service - generates a JD-optimized resume summary."""
 import logging
 from backend.models.profile import UserProfile
-from backend.services.gemini import get_gemini_client
+from backend.services.llm_client import get_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class ResumeTailor:
             - experience_bullets: list[dict] (tailored bullet points per role)
             - suggestions: list[str] (what to add/change)
         """
-        client = get_gemini_client()
+        client = get_llm_client()
         profile_json = profile.model_dump_json(indent=2, exclude_none=True)
         
         system_instruction = (

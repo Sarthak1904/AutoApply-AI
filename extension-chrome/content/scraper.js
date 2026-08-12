@@ -14,7 +14,7 @@ const AutoApplyScraper = (() => {
 
     // Find all interactive form elements
     const selectors = [
-      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"])',
+      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]):not([type="password"])',
       'select',
       'textarea',
       '[contenteditable="true"]',
@@ -63,6 +63,7 @@ const AutoApplyScraper = (() => {
 
     const label = findLabel(el);
     const type = getFieldType(el);
+    if (isSensitiveNonApplicationField(el, label, type)) return null;
 
     const field = {
       id: fieldId,
@@ -111,6 +112,25 @@ const AutoApplyScraper = (() => {
     }
 
     return field;
+  }
+
+  /** Never collect authentication, payment, or government-ID inputs. */
+  function isSensitiveNonApplicationField(el, label, type) {
+    if (type === 'password') return true;
+
+    const autocomplete = (el.getAttribute('autocomplete') || '').toLowerCase();
+    const blockedAutocomplete = [
+      'current-password', 'new-password', 'one-time-code',
+      'cc-name', 'cc-number', 'cc-exp', 'cc-exp-month', 'cc-exp-year',
+      'cc-csc', 'cc-type', 'transaction-amount', 'transaction-currency'
+    ];
+    if (blockedAutocomplete.some(token => autocomplete.split(/\s+/).includes(token))) return true;
+
+    const identity = [
+      el.id, el.name, label, el.placeholder,
+      el.getAttribute('aria-label')
+    ].filter(Boolean).join(' ').toLowerCase();
+    return /\b(password|passcode|one[- ]?time (?:code|password)|otp|credit card|card number|cvv|cvc|social security|ssn|bank account|routing number)\b/.test(identity);
   }
 
   /**
@@ -211,6 +231,18 @@ const AutoApplyScraper = (() => {
       .trim();
   }
 
+  function cleanDescriptionElement(element) {
+    const clone = element.cloneNode(true);
+    clone.querySelectorAll('nav,header,footer,form,button,input,select,textarea,[role="navigation"],[data-automation-id*="progress"],[class*="progress"],[class*="breadcrumb"]').forEach((node) => node.remove());
+    const noisyLine = /^(skip to main content|sign in|settings|candidate home|search for jobs|back to job posting|apply now|autofill with resume|step \d+ of \d+|completed step|save and continue)$/i;
+    const lines = (clone.innerText || clone.textContent || '')
+      .split(/\n+/)
+      .map((line) => line.replace(/\s+/g, ' ').trim())
+      .filter((line) => line.length > 1 && !noisyLine.test(line) && !/^\S+@\S+\.\S+$/.test(line));
+    const deduped = lines.filter((line, index) => index === 0 || line !== lines[index - 1]);
+    return deduped.join('\n').trim().slice(0, 6000);
+  }
+
   /**
    * Extract the job description from the current page.
    * @returns {string} Job description text (max 3000 chars)
@@ -287,7 +319,7 @@ const AutoApplyScraper = (() => {
     for (const sel of selectors) {
       const el = document.querySelector(sel);
       if (el && el.textContent.trim().length > 100) {
-        return el.textContent.trim().slice(0, 3000);
+        return cleanDescriptionElement(el);
       }
     }
 
@@ -304,7 +336,7 @@ const AutoApplyScraper = (() => {
     for (const sel of genericSelectors) {
       const el = document.querySelector(sel);
       if (el && el.textContent.trim().length > 100) {
-        return el.textContent.trim().slice(0, 3000);
+        return cleanDescriptionElement(el);
       }
     }
 
@@ -322,7 +354,7 @@ const AutoApplyScraper = (() => {
           // Get the parent section
           const section = heading.closest('section, div, article');
           if (section && section.textContent.trim().length > 100) {
-            return section.textContent.trim().slice(0, 3000);
+            return cleanDescriptionElement(section);
           }
         }
       }
@@ -335,6 +367,7 @@ const AutoApplyScraper = (() => {
 
     blocks.forEach((block) => {
       const text = block.textContent.trim();
+      if (block.matches('nav,header,footer,form') || block.querySelectorAll('input,select,textarea').length > 4) return;
       // Look for blocks with substantial text and multiple paragraphs
       if (text.length > 200 && text.length < 10000) {
         const pCount = block.querySelectorAll('p, li').length;
@@ -347,7 +380,7 @@ const AutoApplyScraper = (() => {
     });
 
     if (bestBlock) {
-      return bestBlock.textContent.trim().slice(0, 3000);
+      return cleanDescriptionElement(bestBlock);
     }
 
     return '';

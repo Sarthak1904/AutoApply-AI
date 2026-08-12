@@ -2,19 +2,49 @@
 
 import json
 import logging
-import shutil
+import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, File, UploadFile, HTTPException, Body
+from starlette.concurrency import run_in_threadpool
 
 from backend.models.profile import UserProfile
+from backend.models.requests import KnowledgeUpdate
 from backend.services.resume_parser import ResumeParser
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/profile", tags=["profile"])
 
 DATA_DIR = Path(__file__).parent.parent / "data"
+PRIVATE_DIR_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
+
+
+def _ensure_data_dir() -> None:
+    """Create the local data directory with owner-only permissions."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR_MODE)
+    # mkdir does not change permissions on an existing directory.
+    os.chmod(DATA_DIR, PRIVATE_DIR_MODE)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Durably replace a private text file without leaving partial contents."""
+    _ensure_data_dir()
+    fd, temp_name = tempfile.mkstemp(dir=DATA_DIR, prefix=f".{path.name}-")
+    temp_path = Path(temp_name)
+    try:
+        os.fchmod(fd, PRIVATE_FILE_MODE)
+        with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
+            temp_file.write(content)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_path, path)
+        os.chmod(path, PRIVATE_FILE_MODE)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
 
 
 def _load_profile() -> Optional[UserProfile]:
@@ -30,8 +60,8 @@ def _load_profile() -> Optional[UserProfile]:
 def _save_profile(profile: UserProfile) -> None:
     """Save a profile to disk."""
     profile_path = DATA_DIR / "profile.json"
-    with open(profile_path, "w") as f:
-        json.dump(profile.model_dump(exclude_none=True), f, indent=2)
+    content = json.dumps(profile.model_dump(exclude_none=True), indent=2)
+    _atomic_write_text(profile_path, content)
     logger.info("Profile saved to disk")
 
 
@@ -39,29 +69,41 @@ def _save_profile(profile: UserProfile) -> None:
 async def upload_resume(file: UploadFile = File(...)):
     """Upload a PDF resume, parse it, and save the extracted profile.
 
-    The resume is saved to data/resume.pdf and parsed using pdfplumber + Gemini
+    The resume is saved to data/resume.pdf and parsed using pdfplumber + the
+    configured AI provider.
     to extract structured profile data.
     """
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
 
-    # Save the uploaded file
     resume_path = DATA_DIR / "resume.pdf"
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_data_dir()
 
     content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded PDF is empty")
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File too large (max 10MB)")
+    if not content.startswith(b"%PDF-"):
+        raise HTTPException(status_code=400, detail="Uploaded file is not a valid PDF")
 
-    with open(resume_path, "wb") as f:
-        f.write(content)
-
-    logger.info(f"Resume saved: {resume_path} ({len(content)} bytes)")
-
-    # Parse the resume
+    temp_fd, temp_name = tempfile.mkstemp(
+        dir=DATA_DIR,
+        prefix="resume-",
+        suffix=".pdf",
+    )
+    temp_path = Path(temp_name)
     try:
+        # Parse a private temporary file first so a failed upload cannot replace
+        # the user's existing resume.
+        with os.fdopen(temp_fd, "wb") as temp_file:
+            temp_file.write(content)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.chmod(temp_path, PRIVATE_FILE_MODE)
+
         parser = ResumeParser()
-        profile = parser.parse_resume(str(resume_path))
+        profile = await run_in_threadpool(parser.parse_resume, str(temp_path))
 
         # Merge with existing profile if one exists (preserve manual edits)
         existing = _load_profile()
@@ -69,6 +111,9 @@ async def upload_resume(file: UploadFile = File(...)):
             profile = _merge_profiles(existing, profile)
 
         _save_profile(profile)
+        os.replace(temp_path, resume_path)
+        os.chmod(resume_path, PRIVATE_FILE_MODE)
+        logger.info("Resume parsed and promoted (%d bytes)", len(content))
 
         return {
             "status": "success",
@@ -77,26 +122,28 @@ async def upload_resume(file: UploadFile = File(...)):
         }
 
     except Exception as e:
-        logger.error(f"Resume parsing failed: {e}")
+        logger.exception("Resume parsing failed")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to parse resume: {str(e)}",
+            detail="Failed to parse resume",
         )
+    finally:
+        # os.replace removes the temporary path on success; on failure this
+        # guarantees no unparsed resume is retained.
+        if temp_path.exists():
+            temp_path.unlink()
 
 
 @router.post("/upload-knowledge")
-async def upload_knowledge(body: dict = Body(...)):
+async def upload_knowledge(body: KnowledgeUpdate):
     """Upload or update the knowledge.md file.
 
     This is a freeform markdown file with additional information about the user
     that supplements the resume (salary expectations, preferences, common Q&A, etc.)
     """
-    content = body.get("content", "")
+    content = body.content
     knowledge_path = DATA_DIR / "knowledge.md"
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    with open(knowledge_path, "w") as f:
-        f.write(content)
+    _atomic_write_text(knowledge_path, content)
 
     logger.info(f"Knowledge file saved ({len(content)} chars)")
 
@@ -168,16 +215,30 @@ def _merge_profiles(existing: UserProfile, new: UserProfile) -> UserProfile:
     existing_dict = existing.model_dump()
     new_dict = new.model_dump()
 
-    # For personal info, prefer existing non-null values
+    # For personal info, prefer existing non-empty values. Address is nested,
+    # so merge its individual fields rather than treating its default dict as
+    # a manually supplied value.
     for key, value in new_dict.get("personal", {}).items():
-        if value is not None:
+        if key == "address" and isinstance(value, dict):
+            existing_address = existing_dict.setdefault("personal", {}).setdefault("address", {})
+            for address_key, address_value in value.items():
+                if address_value is not None and not existing_address.get(address_key):
+                    existing_address[address_key] = address_value
+        elif value is not None:
             existing_val = existing_dict.get("personal", {}).get(key)
-            if existing_val is None:
+            if not existing_val:
                 existing_dict.setdefault("personal", {})[key] = value
 
     # For list fields (work_experience, education, skills), use the new parsed version
     # since it's from the latest resume
-    for list_field in ["work_experience", "education", "skills", "certifications", "languages_spoken"]:
+    for list_field in [
+        "work_experience",
+        "education",
+        "skills",
+        "certifications",
+        "projects",
+        "languages_spoken",
+    ]:
         if new_dict.get(list_field):
             existing_dict[list_field] = new_dict[list_field]
 

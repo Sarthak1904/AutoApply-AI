@@ -1,7 +1,7 @@
 """AutoApply Backend — FastAPI application entry point."""
 
-import json
 import logging
+import re
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -24,25 +25,12 @@ logger = logging.getLogger("autoapply")
 
 DATA_DIR = Path(__file__).parent / "data"
 
-# Empty JSON structures for initialization
-INIT_FILES = {
-    "applications.json": [],
-    "corrections.json": [],
-    "answer_bank.json": [],
-}
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown events."""
-    # Startup: create data directory and initialize empty JSON files
+    # Startup: create the private data directory. SQLite initializes lazily.
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    for filename, default_content in INIT_FILES.items():
-        filepath = DATA_DIR / filename
-        if not filepath.exists():
-            with open(filepath, "w") as f:
-                json.dump(default_content, f)
-            logger.info(f"Initialized {filename}")
+    DATA_DIR.chmod(0o700)
 
     logger.info("AutoApply backend started")
     logger.info(f"Data directory: {DATA_DIR.resolve()}")
@@ -50,8 +38,11 @@ async def lifespan(app: FastAPI):
     yield  # App runs here
 
     logger.info("AutoApply backend shutting down")
-    from backend.services.database import get_database
-    get_database().close()
+    from backend.services.database import close_database
+    from backend.services.llm_client import close_llm_client
+
+    close_database()
+    close_llm_client()
 
 
 # Create the app
@@ -62,20 +53,48 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow the Firefox extension to make requests from any origin
+_TRUSTED_WEB_ORIGINS = {"http://localhost:8000", "http://127.0.0.1:8000"}
+_EXTENSION_ORIGIN = re.compile(r"^(?:chrome|moz)-extension://[A-Za-z0-9_-]+$")
+
+
+def _is_trusted_origin(origin: str | None) -> bool:
+    """Allow CLI/same-origin calls and requests from installed extensions."""
+    return (
+        origin is None
+        or origin in _TRUSTED_WEB_ORIGINS
+        or _EXTENSION_ORIGIN.fullmatch(origin) is not None
+    )
+
+
+@app.middleware("http")
+async def reject_untrusted_browser_origins(request, call_next):
+    """Enforce the origin boundary server-side, including simple form requests."""
+    origin = request.headers.get("origin")
+    if request.url.path.startswith("/api/") and not _is_trusted_origin(origin):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "This local API only accepts extension or local requests."},
+        )
+    return await call_next(request)
+
+# API requests are proxied by the extension background context. Only extension
+# origins (plus local dashboard development) need cross-origin access; allowing
+# every website here would expose the user's local profile and application data.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=sorted(_TRUSTED_WEB_ORIGINS),
+    allow_origin_regex=r"^(?:chrome|moz)-extension://[A-Za-z0-9_-]+$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Import and include routers
-from backend.routers import profile, autofill, applications
+from backend.routers import profile, autofill, applications, workspace
 
 app.include_router(profile.router)
 app.include_router(autofill.router)
 app.include_router(applications.router)
+app.include_router(workspace.router)
 
 # Mount dashboard static files
 dashboard_dir = Path(__file__).parent / "dashboard"
@@ -99,14 +118,11 @@ async def health_check():
     resume_exists = (DATA_DIR / "resume.pdf").exists()
     knowledge_exists = (DATA_DIR / "knowledge.md").exists()
 
-    # Count applications
-    apps_path = DATA_DIR / "applications.json"
-    app_count = 0
-    try:
-        with open(apps_path, "r") as f:
-            app_count = len(json.load(f))
-    except (json.JSONDecodeError, ValueError, FileNotFoundError):
-        app_count = 0
+    from backend.services.database import get_database
+    from backend.services.llm_client import inspect_provider_configuration
+
+    app_count = get_database().count_applications()
+    provider_config = inspect_provider_configuration()
 
     return {
         "status": "healthy",
@@ -114,6 +130,10 @@ async def health_check():
         "resume_uploaded": resume_exists,
         "knowledge_loaded": knowledge_exists,
         "total_applications": app_count,
+        "ai_provider": provider_config["provider"],
+        "ai_model": provider_config["model"],
+        "ai_ready": provider_config["configured"],
+        "ai_error": provider_config["error"],
     }
 
 

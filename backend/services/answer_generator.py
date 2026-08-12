@@ -6,7 +6,7 @@ from typing import Optional
 
 from backend.models.profile import UserProfile
 from backend.models.application import AnswerBankEntry
-from backend.services.gemini import get_gemini_client
+from backend.services.llm_client import get_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class AnswerGenerator:
         Returns:
             A natural, human-sounding answer string.
         """
-        client = get_gemini_client()
+        client = get_llm_client()
 
         # Build profile summary
         profile_summary = ""

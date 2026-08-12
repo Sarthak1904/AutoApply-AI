@@ -1,17 +1,21 @@
-"""Gemini API client wrapper with retry logic, rate limiting, and JSON extraction."""
+"""Gemini API client wrapper with retry logic and rate limiting.
 
-import json
+Implements the LLMClient interface for Google Gemini models.
+"""
+
 import re
 import time
 import logging
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional
 import collections
 import threading
 
 import google.generativeai as genai
 from dotenv import load_dotenv
 import os
+
+from backend.services.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +48,8 @@ class RateLimiter:
 _rate_limiter = RateLimiter(max_calls=2, period=60.0)
 
 
-class GeminiClient:
-    """Wrapper around Google Gemini API with retry logic and JSON parsing."""
+class GeminiClient(LLMClient):
+    """Google Gemini API client with retry logic, implementing the LLMClient interface."""
 
     def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-2.5-flash"):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
@@ -54,21 +58,31 @@ class GeminiClient:
                 "GEMINI_API_KEY not found. Set it in backend/.env or pass it directly."
             )
         genai.configure(api_key=self.api_key)
-        self.model_name = model_name
+        self._model_name = model_name
         self.model = genai.GenerativeModel(model_name)
         logger.info(f"Gemini client initialized with model: {model_name}")
+
+    # -- LLMClient interface --------------------------------------------------
+
+    @property
+    def provider_name(self) -> str:
+        return "gemini"
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
 
     def generate(
         self,
         prompt: str,
         system_instruction: Optional[str] = None,
-        max_retries: int = 5,
+        max_retries: int = 3,
     ) -> str:
         """Generate text from a prompt with retry logic."""
         model = self.model
         if system_instruction:
             model = genai.GenerativeModel(
-                self.model_name,
+                self._model_name,
                 system_instruction=system_instruction,
             )
 
@@ -85,6 +99,16 @@ class GeminiClient:
             except Exception as e:
                 last_error = e
                 error_str = str(e)
+
+                if re.search(
+                    r"API_KEY_INVALID|invalid api key|PERMISSION_DENIED|UNAUTHENTICATED",
+                    error_str,
+                    re.IGNORECASE,
+                ):
+                    raise RuntimeError("Gemini rejected the configured API key.") from e
+
+                if attempt == max_retries - 1:
+                    break
                 
                 # Default backoff: 5s, 10s, 20s, 40s, 80s
                 wait_time = (2 ** attempt) * 5.0
@@ -103,59 +127,3 @@ class GeminiClient:
         raise RuntimeError(
             f"Gemini API failed after {max_retries} attempts. Last error: {last_error}"
         )
-
-    def generate_json(
-        self,
-        prompt: str,
-        system_instruction: Optional[str] = None,
-        max_retries: int = 3,
-    ) -> Union[dict, list]:
-        """Generate a response and parse it as JSON."""
-        raw = self.generate(prompt, system_instruction, max_retries)
-        return self._extract_json(raw)
-
-    @staticmethod
-    def _extract_json(text: str) -> Union[dict, list]:
-        """Extract JSON from a response that may be wrapped in markdown code blocks."""
-        text_stripped = text.strip()
-        try:
-            return json.loads(text_stripped)
-        except json.JSONDecodeError:
-            pass
-
-        json_block_match = re.search(
-            r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL
-        )
-        if json_block_match:
-            try:
-                return json.loads(json_block_match.group(1).strip())
-            except json.JSONDecodeError:
-                pass
-
-        for start_char, end_char in [("{", "}"), ("[", "]")]:
-            start_idx = text.find(start_char)
-            if start_idx != -1:
-                end_idx = text.rfind(end_char)
-                if end_idx > start_idx:
-                    try:
-                        return json.loads(text[start_idx : end_idx + 1])
-                    except json.JSONDecodeError:
-                        pass
-
-        raise ValueError(
-            f"Could not extract valid JSON from Gemini response. Raw text:\n{text[:500]}"
-        )
-
-
-# Singleton instance (lazily initialized)
-_client: Optional[GeminiClient] = None
-_client_lock = threading.Lock()
-
-def get_gemini_client() -> GeminiClient:
-    """Get or create the singleton Gemini client."""
-    global _client
-    if _client is None:
-        with _client_lock:
-            if _client is None:  # double-check
-                _client = GeminiClient()
-    return _client

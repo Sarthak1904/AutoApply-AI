@@ -1,4 +1,4 @@
-"""Resume parsing service — extracts text from PDF and structures it via Gemini."""
+"""Resume parsing service — extracts PDF text and structures it with the configured LLM."""
 
 import logging
 from pathlib import Path
@@ -7,7 +7,7 @@ from typing import Optional
 import pdfplumber
 
 from backend.models.profile import UserProfile
-from backend.services.gemini import get_gemini_client
+from backend.services.llm_client import get_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class ResumeParser:
     def parse_resume(pdf_path: str) -> UserProfile:
         """Parse a PDF resume into a structured UserProfile.
 
-        Extracts raw text from the PDF, then uses Gemini to structure it
+        Extracts raw text from the PDF, then uses the configured LLM to structure it
         into the UserProfile JSON schema.
 
         Args:
@@ -57,8 +57,8 @@ class ResumeParser:
         if not raw_text.strip():
             raise ValueError("Could not extract any text from the PDF. Is it a scanned image?")
 
-        # Send to Gemini for structuring
-        client = get_gemini_client()
+        # Send to the configured provider for structuring
+        client = get_llm_client()
 
         system_instruction = (
             "You are an expert resume parser. Your job is to extract structured "

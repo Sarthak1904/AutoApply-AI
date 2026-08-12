@@ -4,15 +4,78 @@
  */
 
 const AutoApplyFiller = (() => {
+  // Navigation is intentionally more restrictive than the labels that a site may
+  // use. The extension must never turn "Fill & Next" into a submission action.
+  const NEXT_BUTTON_TEXTS = [
+    'next', 'continue', 'save & continue', 'save and continue',
+    'proceed', 'save & next', 'save and next', 'forward',
+  ];
+  const SUBMIT_LIKE_TEXT = [
+    'submit', 'apply', 'finish', 'complete', 'confirm', 'review', 'send',
+  ];
+
+  function controlText(el) {
+    return [
+      el.textContent,
+      el.value,
+      el.getAttribute('aria-label'),
+      el.getAttribute('title'),
+      el.getAttribute('name'),
+      el.getAttribute('id'),
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+      .trim();
+  }
+
+  /** Return true for a control that could submit or finalize an application. */
+  function isSubmitLikeControl(el) {
+    const declaredType = (el.getAttribute('type') || '').toLowerCase();
+    // A button without an explicit type submits when it belongs to a form. The
+    // DOM `type` property also resolves that default, so reject both cases.
+    const resolvedType = (el.type || '').toLowerCase();
+    if (declaredType === 'submit' || declaredType === 'image' || resolvedType === 'submit') {
+      return true;
+    }
+    if (el.hasAttribute('formaction') || el.hasAttribute('formmethod')) {
+      return true;
+    }
+    const text = controlText(el);
+    return SUBMIT_LIKE_TEXT.some((term) => text.includes(term));
+  }
+
+  /** Return true only for an explicitly safe, non-submitting navigation control. */
+  function isSafeNextControl(el) {
+    if (!el || el.offsetParent === null || el.disabled) return false;
+    if (el.closest('.autoapply-overlay')) return false;
+    if (isSubmitLikeControl(el)) return false;
+
+    const text = controlText(el);
+    return NEXT_BUTTON_TEXTS.some((target) => text.includes(target));
+  }
+
+  function navigationControls() {
+    return [
+      ...document.querySelectorAll('button'),
+      ...document.querySelectorAll('input[type="button"]'),
+      ...document.querySelectorAll('a[role="button"]'),
+      ...document.querySelectorAll('[role="button"]'),
+    ];
+  }
+
   /**
    * Fill a single form field based on an instruction.
    * Dispatches proper events for React/Angular/Vue framework compatibility.
    * @param {Object} instruction - Fill instruction from backend
    * @returns {boolean} True if filled successfully
    */
-  async function fillField(instruction) {
+  async function fillField(instruction, options = {}) {
     const { field_id, action, value } = instruction;
-    if (action === 'skip' || value === undefined || value === null) return false;
+    if (action === 'skip') return { ok: false, field_id, action, reason: 'Skipped by the mapping.' };
+    if (value === undefined || value === null) {
+      return { ok: false, field_id, action, reason: 'No value was supplied for this field.' };
+    }
 
     // Find the element by ID or data attribute
     let el = document.getElementById(field_id);
@@ -21,32 +84,47 @@ const AutoApplyFiller = (() => {
     }
     if (!el) {
       console.warn(`[AutoApply] Field not found: ${field_id}`);
-      return false;
+      return { ok: false, field_id, action, reason: 'The field is no longer present on this page.' };
     }
 
     try {
+      let ok = false;
+      let reason = '';
       switch (action) {
         case 'fill':
-          return fillTextInput(el, value);
+          ok = fillTextInput(el, value);
+          reason = 'The page rejected the text value.';
+          break;
 
         case 'select':
-          return await fillSelect(el, value);
+          ok = await fillSelect(el, value);
+          reason = `No matching option was available for “${value}”.`;
+          break;
 
         case 'check':
-          return fillCheckbox(el, value);
+          ok = fillCheckbox(el, value);
+          reason = `Could not set the choice “${value}”.`;
+          break;
 
         case 'upload':
-          // Highlight the upload field — user must select the file manually
-          highlightUploadField(el);
-          return true;
+          if (typeof options.uploadHandler === 'function') {
+            const upload = await options.uploadHandler(el, instruction);
+            ok = Boolean(upload && upload.ok);
+            reason = upload && upload.reason ? upload.reason : 'The resume could not be attached automatically.';
+          } else {
+            highlightUploadField(el);
+            reason = 'Choose a resume version to attach automatically, or select the file manually.';
+          }
+          break;
 
         default:
           console.warn(`[AutoApply] Unknown action: ${action}`);
-          return false;
+          reason = `Unsupported fill action: ${action}.`;
       }
+      return { ok, field_id, action, reason: ok ? '' : reason };
     } catch (err) {
       console.error(`[AutoApply] Error filling ${field_id}:`, err);
-      return false;
+      return { ok: false, field_id, action, reason: err.message || 'The page prevented this field from being filled.' };
     }
   }
 
@@ -201,7 +279,7 @@ const AutoApplyFiller = (() => {
    */
   function highlightUploadField(el) {
     const wrapper = el.closest('div') || el.parentElement || el;
-    wrapper.style.outline = '3px solid #667eea';
+    wrapper.style.outline = '3px solid #ea6a4f';
     wrapper.style.outlineOffset = '2px';
     wrapper.style.borderRadius = '4px';
     wrapper.style.animation = 'autoapply-pulse 2s ease-in-out infinite';
@@ -212,8 +290,8 @@ const AutoApplyFiller = (() => {
       style.id = 'autoapply-upload-style';
       style.textContent = `
         @keyframes autoapply-pulse {
-          0%, 100% { outline-color: #667eea; }
-          50% { outline-color: #764ba2; }
+          0%, 100% { outline-color: #ea6a4f; }
+          50% { outline-color: #3f8a96; }
         }
       `;
       document.head.appendChild(style);
@@ -223,10 +301,11 @@ const AutoApplyFiller = (() => {
   /**
    * Fill all fields from an array of instructions.
    * @param {Array} instructions - Array of fill instructions
-   * @returns {{ filled: number, skipped: number, failed: number }}
+   * @returns {{ filled: number, skipped: number, failed: number, failures: Array }}
    */
-  async function fillAllFields(instructions) {
+  async function fillAllFields(instructions, options = {}) {
     let filled = 0, skipped = 0, failed = 0;
+    const failures = [];
 
     for (const instruction of instructions) {
       if (instruction.action === 'skip') {
@@ -236,67 +315,59 @@ const AutoApplyFiller = (() => {
 
       await new Promise(resolve => setTimeout(resolve, 50)); // Small delay between fields
 
-      const success = await fillField(instruction);
-      if (success) {
+      const outcome = await fillField(instruction, options);
+      if (outcome.ok) {
         filled++;
       } else {
         failed++;
+        failures.push({
+          field_id: instruction.field_id,
+          action: instruction.action,
+          reason: outcome.reason || 'The field could not be filled.',
+        });
       }
     }
 
     console.log(`[AutoApply] Fill complete: ${filled} filled, ${skipped} skipped, ${failed} failed`);
-    return { filled, skipped, failed };
+    return { filled, skipped, failed, failures };
   }
 
   /**
-   * Find and click the Next/Continue/Submit button.
+   * Find and click a conservative Next/Continue control.
    * @returns {boolean} True if a button was found and clicked
    */
   function clickNextButton() {
-    const buttonTexts = [
-      'next', 'continue', 'save & continue', 'save and continue',
-      'proceed', 'submit application', 'apply', 'save & next',
-      'save and next', 'forward',
-    ];
-
-    // Look for buttons and inputs
-    const candidates = [
-      ...document.querySelectorAll('button'),
-      ...document.querySelectorAll('input[type="submit"]'),
-      ...document.querySelectorAll('a[role="button"]'),
-      ...document.querySelectorAll('[role="button"]'),
-    ];
-
-    // Filter for visible, likely next buttons
-    const matches = [];
-    for (const btn of candidates) {
-      if (btn.offsetParent === null) continue; // Hidden
-      if (btn.disabled) continue;
-      if (btn.closest('.autoapply-overlay')) continue; // Our overlay
-
-      const text = (btn.textContent || btn.value || '').toLowerCase().trim();
-
-      for (const target of buttonTexts) {
-        if (text.includes(target)) {
-          // Prefer primary/highlighted buttons
-          const isPrimary =
-            btn.classList.contains('primary') ||
-            btn.classList.contains('btn-primary') ||
-            btn.getAttribute('data-automation-id')?.includes('bottom') ||
-            getComputedStyle(btn).backgroundColor !== 'rgba(0, 0, 0, 0)';
-
-          matches.push({ el: btn, text, isPrimary, priority: buttonTexts.indexOf(target) });
-          break;
-        }
-      }
+    const pageState = isLastPage();
+    if (pageState.isLast || pageState.isAmbiguous) {
+      console.warn(`[AutoApply] Refusing to advance: ${pageState.reason}`);
+      return false;
     }
+
+    // Only explicit non-submit controls with an unambiguous next label may be clicked.
+    const matches = navigationControls()
+      .filter(isSafeNextControl)
+      .map((btn) => {
+        const text = controlText(btn);
+        const matchedTarget = NEXT_BUTTON_TEXTS.find((target) => text.includes(target));
+        const isPrimary =
+          btn.classList.contains('primary') ||
+          btn.classList.contains('btn-primary') ||
+          btn.getAttribute('data-automation-id')?.includes('bottom') ||
+          getComputedStyle(btn).backgroundColor !== 'rgba(0, 0, 0, 0)';
+        return {
+          el: btn,
+          text,
+          isPrimary,
+          priority: NEXT_BUTTON_TEXTS.indexOf(matchedTarget),
+        };
+      });
 
     if (matches.length === 0) {
       console.warn('[AutoApply] No next/continue button found');
       return false;
     }
 
-    // Sort: primary first, then by priority in buttonTexts list
+    // Sort: primary first, then by priority in NEXT_BUTTON_TEXTS.
     matches.sort((a, b) => {
       if (a.isPrimary && !b.isPrimary) return -1;
       if (!a.isPrimary && b.isPrimary) return 1;
@@ -304,7 +375,12 @@ const AutoApplyFiller = (() => {
     });
 
     const best = matches[0];
-    console.log(`[AutoApply] Clicking button: "${best.text}"`);
+    // Re-check immediately before the side effect in case the page mutated.
+    if (!isSafeNextControl(best.el)) {
+      console.warn('[AutoApply] Refusing to click a control that became submit-like.');
+      return false;
+    }
+    console.log(`[AutoApply] Clicking safe navigation button: "${best.text}"`);
     best.el.click();
     return true;
   }
@@ -343,32 +419,18 @@ const AutoApplyFiller = (() => {
    * @returns {{ isLast: boolean, reason: string }}
    */
   function isLastPage() {
-    // Signal 1: Check button text
-    const submitKeywords = [
-      'submit application', 'submit', 'apply now', 'send application',
-      'confirm application', 'review and submit', 'complete application',
-      'finish', 'final submit'
-    ];
-    const nextKeywords = [
-      'next', 'continue', 'save & continue', 'save and continue',
-      'proceed', 'save & next', 'save and next', 'forward'
-    ];
-    
+    // Signal 1: An explicit submit-like control is a hard safety boundary. A
+    // page may contain both "Next" and "Submit" controls, so do not guess.
     const allButtons = [
-      ...document.querySelectorAll('button'),
+      ...navigationControls(),
       ...document.querySelectorAll('input[type="submit"]'),
-      ...document.querySelectorAll('[role="button"]'),
+      ...document.querySelectorAll('input[type="image"]'),
     ];
-    
-    let hasSubmitButton = false;
-    let hasNextButton = false;
-    
-    for (const btn of allButtons) {
-      if (btn.offsetParent === null || btn.disabled) continue;
-      const text = (btn.textContent || btn.value || '').toLowerCase().trim();
-      if (submitKeywords.some(kw => text.includes(kw))) hasSubmitButton = true;
-      if (nextKeywords.some(kw => text.includes(kw))) hasNextButton = true;
-    }
+    const visibleButtons = allButtons.filter(
+      (btn) => btn.offsetParent !== null && !btn.disabled && !btn.closest('.autoapply-overlay')
+    );
+    const hasSubmitButton = visibleButtons.some(isSubmitLikeControl);
+    const hasSafeNextButton = visibleButtons.some(isSafeNextControl);
     
     // Signal 2: Check for progress indicators (e.g., "Step 5 of 5")
     const bodyText = document.body.innerText;
@@ -385,19 +447,19 @@ const AutoApplyFiller = (() => {
     const isReviewPage = inputCount <= 2;
     
     // Decision logic
-    const isLast = (hasSubmitButton && !hasNextButton) 
-                || progressComplete 
-                || (!hasNextButton && isReviewPage);
+    const isLast = hasSubmitButton || progressComplete || (!hasSafeNextButton && isReviewPage);
+    const isAmbiguous = !isLast && !hasSafeNextButton;
     
     const reasons = [];
-    if (hasSubmitButton && !hasNextButton) reasons.push('submit button found, no next button');
+    if (hasSubmitButton) reasons.push('submit-like control found');
     if (progressComplete) reasons.push('progress indicator shows final step');
-    if (!hasNextButton && isReviewPage) reasons.push('no next button and very few input fields');
-    if (!hasNextButton && !hasSubmitButton) reasons.push('no navigation buttons found');
-    
+    if (!hasSafeNextButton && isReviewPage) reasons.push('no safe next button and very few input fields');
+    if (isAmbiguous) reasons.push('no unambiguous non-submit next button found');
+
     return {
       isLast,
-      reason: reasons.join('; ') || 'next/continue button available'
+      isAmbiguous,
+      reason: reasons.join('; ') || 'safe next/continue button available'
     };
   }
 
@@ -439,7 +501,7 @@ const AutoApplyFiller = (() => {
     }
   }
 
-  return { fillField, fillAllFields, clickNextButton, detectPageChange, isLastPage };
+  return { fillField, fillAllFields, highlightUploadField, clickNextButton, detectPageChange, isLastPage };
 })();
 
 if (typeof window !== 'undefined') {
