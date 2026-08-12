@@ -1,126 +1,49 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>AutoApply Control Panel</title>
-  <link rel="stylesheet" href="popup.css">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AutoApply</title>
+  <link rel="stylesheet" href="popup.css?v=7">
 </head>
 <body>
-  <div class="popup-container">
-    <!-- Header -->
-    <header class="popup-header">
-      <div class="logo-section">
-        <div class="logo-icon">A</div>
-        <span class="logo-text">AutoApply</span>
-      </div>
-      <div class="status-indicator" id="backend-status">
-        <span class="status-dot"></span>
-        <span class="status-text">Checking connection...</span>
-      </div>
+  <main class="launcher">
+    <header class="launcher-header">
+      <div class="brand"><img class="brand-mark" src="../icons/icon-48.svg" alt=""><span><strong>AutoApply</strong><small>Application assistant</small></span></div>
+      <div class="launcher-tools"><button id="theme-toggle" class="theme-toggle" type="button" aria-label="Color theme: System" title="Change color theme"><span aria-hidden="true">◐</span><small>System</small></button><span id="backend-status" class="status"><i></i><span>Checking…</span></span></div>
     </header>
 
-    <!-- Navigation Tabs -->
-    <nav class="popup-tabs">
-      <button class="tab-btn active" id="tab-dashboard">Dashboard</button>
-      <button class="tab-btn" id="tab-profile">Profile & Info</button>
-      <button class="tab-btn" id="tab-batch">Batch</button>
-    </nav>
+    <div class="route" aria-label="Application workflow"><span class="active">Capture</span><i></i><span>Prepare</span><i></i><span>Apply</span><i></i><span>Follow up</span></div>
 
-    <!-- Main Content Panel -->
-    <main class="popup-content">
-      
-      <!-- Dashboard Section -->
-      <section class="content-section active" id="sect-dashboard">
-        <div class="setup-checklist">
-          <div class="checklist-item" id="chk-resume">
-            <span class="chk-icon">○</span>
-            <span class="chk-label">Resume PDF uploaded</span>
-          </div>
-          <div class="checklist-item" id="chk-knowledge">
-            <span class="chk-icon">○</span>
-            <span class="chk-label">Knowledge file (knowledge.md) set</span>
-          </div>
-        </div>
+    <section id="page-card" class="page-card">
+      <p class="utility-label">Current page</p>
+      <h1 id="page-title">Checking this tab…</h1>
+      <p id="page-copy">AutoApply is looking for an application form.</p>
+      <button id="prepare-btn" class="primary-action" type="button" disabled>Prepare application<span>Review before anything is filled</span></button>
+    </section>
 
-        <button class="start-btn" id="start-autofill" disabled>
-          <span>Start AutoFill Scan</span>
-          <small>Open a job application page first</small>
-        </button>
+    <section class="readiness" aria-labelledby="readiness-title">
+      <div class="section-heading"><div><p class="utility-label">Readiness</p><h2 id="readiness-title">Ready to apply</h2></div><button id="open-setup" class="text-button" type="button">Review profile</button></div>
+      <div class="readiness-list">
+        <div id="ready-backend" class="readiness-row"><i></i><span><strong>Local backend</strong><small>Checking connection</small></span></div>
+        <div id="ready-profile" class="readiness-row"><i></i><span><strong>Profile & resume</strong><small>Checking reusable details</small></span></div>
+        <div id="ready-ai" class="readiness-row"><i></i><span><strong>AI provider</strong><small>Checking configuration</small></span></div>
+      </div>
+    </section>
 
-        <div class="recent-apps-section">
-          <h3>Recent Applications</h3>
-          <div id="recent-apps-list" class="apps-list">
-            <div class="no-apps-msg">No applications logged yet.</div>
-          </div>
-        </div>
-      </section>
+    <section id="offline-help" class="offline-help" hidden>
+      <strong>Start the local service</strong>
+      <code>source backend/venv/bin/activate<br>python -m backend.main</code>
+      <p>Your profile stays local; the extension connects only to port 8000.</p>
+    </section>
 
-      <!-- Profile & Knowledge Section -->
-      <section class="content-section" id="sect-profile">
-        <button id="open-full-tab-btn" class="save-btn" style="margin-bottom: 15px; background: var(--bg-surface); border: 1px solid var(--border); color: var(--text-muted);">
-          ↗️ Open Setup in Full Tab (Fixes Mac upload issue)
-        </button>
-        <div class="form-group">
-          <label>1. Upload Resume (PDF)</label>
-          <div class="file-upload-zone" id="resume-drop-zone">
-            <input type="file" id="resume-file-input" accept=".pdf" style="display: none;">
-            <div class="upload-zone-text">
-              <span class="upload-icon">📄</span>
-              <span class="upload-prompt">Drag & Drop PDF here (or click)</span>
-              <span class="upload-status" id="resume-upload-status">Clicking may close popup on Mac</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label for="knowledge-input">2. Knowledge File (Extra Info / markdown)</label>
-          <textarea id="knowledge-input" placeholder="Add extra context that's not on your resume. E.g.:
-- Preferred salary: 15,00,000 INR
-- Notice period: 30 days
-- Willing to relocate: Yes
-- Preferred work style: Remote or hybrid
-- Legal details: Authorized to work in India (citizen)"></textarea>
-          <button class="save-btn" id="save-knowledge-btn">Save Knowledge File</button>
-        </div>
-
-        <div class="form-group" style="margin-top: 16px;">
-          <label>3. Structured Profile Details</label>
-          <div class="profile-preview-card">
-            <div id="profile-name">Name: —</div>
-            <div id="profile-email">Email: —</div>
-            <div id="profile-phone">Phone: —</div>
-            <div id="profile-skills-count">Skills: —</div>
-          </div>
-        </div>
-      </section>
-
-      <!-- Batch Apply Section -->
-      <section class="content-section" id="sect-batch">
-        <div class="form-group">
-          <label for="batch-urls-input">Paste job application URLs (one per line):</label>
-          <textarea id="batch-urls-input" placeholder="https://example.com/apply/1&#10;https://example.com/apply/2" style="height: 120px;"></textarea>
-        </div>
-        <button class="start-btn" id="start-batch-btn">
-          <span>Start Batch Apply</span>
-        </button>
-        <div class="batch-status-section" style="margin-top: 15px; display: none;">
-          <h3>Batch Progress</h3>
-          <div id="batch-status-log" class="batch-log-container">
-            <div class="no-apps-msg">No batch tasks started yet.</div>
-          </div>
-        </div>
-      </section>
-
-    </main>
-
-    <!-- Footer Status -->
-    <footer class="popup-footer">
-      <span id="footer-msg">Ready</span>
+    <footer class="launcher-footer">
+      <button id="open-workspace" type="button">Open workspace</button>
+      <button id="open-batch" type="button">Prepare a batch</button>
     </footer>
-  </div>
-
-  <script src="../lib/browser-polyfill.js"></script>
-  <script src="../lib/utils.js"></script>
-  <script src="popup.js"></script>
+  </main>
+  <script src="../lib/browser-polyfill.js?v=2"></script>
+  <script src="../lib/utils.js?v=2"></script>
+  <script src="popup.js?v=3"></script>
 </body>
 </html>

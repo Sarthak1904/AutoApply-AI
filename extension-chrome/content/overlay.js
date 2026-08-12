@@ -33,7 +33,244 @@
   let cachedDuplicateRes = null; // Cached duplicate response
   let autopilotActive = false;
   let autopilotStep = 0;
+  let autopilotState = 'idle';
+  let autopilotMessage = '';
+  let readyChipHost = null;
+  let lastFillSnapshot = [];
+  let hasFilledCurrentPage = false;
+  let receiptRecorded = false;
+  let preparationSummary = { ready_count: 0, review_count: 0, skipped_count: 0 };
+  const THEME_KEY = 'autoapply_theme';
+  const themeChoices = new Set(['system', 'light', 'dark']);
+  const BRAND_MARK = `<span class="autoapply-logo-icon" aria-hidden="true"><svg viewBox="0 0 48 48" focusable="false"><rect x="1" y="1" width="46" height="46" rx="12" fill="#17213A" stroke="#34425E" stroke-width="2"/><path d="M9 7h24l7 7v27H9z" fill="#526CE7"/><path d="M33 7v7h7z" fill="#DDE3FA"/><path d="M13 12v24" stroke="#F47D68" stroke-width="4" stroke-linecap="round"/><path d="M17.5 34 24 15l6.7 19M20.3 27h7.5" fill="none" stroke="#FFFDF8" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/><path d="m25.5 27.5 3.2 3.2 6.7-8" fill="none" stroke="#55C5B2" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`;
+  const colorScheme = window.matchMedia('(prefers-color-scheme: dark)');
+  let themePreference = 'system';
   const MAX_AUTOPILOT_STEPS = 15;
+  let fieldFailures = new Map();
+  let workspace = {
+    opportunityId: null,
+    packetId: null,
+    resumeVersions: [],
+    selectedResumeVersionId: null,
+    policy: null,
+  };
+
+  function resolvedTheme() {
+    return themePreference === 'system' ? (colorScheme.matches ? 'dark' : 'light') : themePreference;
+  }
+
+  function applyOverlayTheme() {
+    if (overlayContainer) overlayContainer.dataset.theme = resolvedTheme();
+  }
+
+  async function initializeTheme() {
+    const saved = await browser.storage.local.get(THEME_KEY);
+    themePreference = themeChoices.has(saved[THEME_KEY]) ? saved[THEME_KEY] : 'system';
+    applyOverlayTheme();
+  }
+
+  function opportunityPayload() {
+    return {
+      url: window.location.href,
+      company: companyName || 'Unknown',
+      role: roleName || 'Unknown',
+      platform: UTILS.detectPlatform(window.location.href),
+      page_title: document.title,
+      job_description_snippet: jdText ? jdText.slice(0, 3000) : '',
+      job_description: jdText || '',
+      source: 'browser_extension',
+    };
+  }
+
+  function workspaceId(response, key) {
+    return response?.[key]?.id || response?.[`${key}_id`] || response?.id || null;
+  }
+
+  async function loadWorkspaceContext({ duplicateResolution = '', existingId = null } = {}) {
+    if (!duplicateResolution && workspace.opportunityId) {
+      duplicateResolution = 'reuse';
+      existingId = workspace.opportunityId;
+    }
+    const payload = opportunityPayload();
+    const policyQuery = `?url=${encodeURIComponent(payload.url)}&platform=${encodeURIComponent(payload.platform)}`;
+    const duplicateQuery = `?url=${encodeURIComponent(payload.url)}&company=${encodeURIComponent(payload.company)}&role=${encodeURIComponent(payload.role)}`;
+    const [versions, policy, duplicates] = await Promise.allSettled([
+      UTILS.workspaceCall('/resume-versions'),
+      UTILS.workspaceCall(`/policy${policyQuery}`),
+      UTILS.workspaceCall(`/duplicates${duplicateQuery}`),
+    ]);
+
+    if (versions.status === 'fulfilled') {
+      workspace.resumeVersions = versions.value?.versions || versions.value?.items || [];
+      const active = workspace.resumeVersions.find((version) => version.active);
+      if (!workspace.selectedResumeVersionId) {
+        workspace.selectedResumeVersionId = active?.id || workspace.resumeVersions[0]?.id || null;
+      }
+    }
+    if (policy.status === 'fulfilled') {
+      workspace.policy = policy.value?.policy || policy.value || null;
+    }
+    const matches = duplicates.status === 'fulfilled' ? (duplicates.value?.matches || []) : [];
+    if (matches.length && !duplicateResolution) return { duplicates: matches };
+    const opportunity = await UTILS.workspaceCall('/opportunities/upsert', 'POST', {
+      ...payload,
+      status: 'preparing',
+      duplicate_resolution: duplicateResolution || 'create_new',
+      existing_id: existingId,
+    });
+    const nextOpportunityId = workspaceId(opportunity, 'opportunity');
+    if (workspace.opportunityId && workspace.opportunityId !== nextOpportunityId) workspace.packetId = null;
+    workspace.opportunityId = nextOpportunityId;
+    return { duplicates: matches, opportunity };
+  }
+
+  function policyBlocksAutopilot() {
+    return workspace.policy && workspace.policy.allow_autopilot === false;
+  }
+
+  function policyMessage() {
+    if (!workspace.policy) return '';
+    return workspace.policy.message || workspace.policy.reason || '';
+  }
+
+  function renderWorkspaceContext() {
+    const policyText = policyMessage();
+    const versions = workspace.resumeVersions || [];
+    const versionSelect = versions.length
+      ? `<label style="display:block;font-size:11px;margin-top:8px;">Resume version
+          <select class="autoapply-resume-version" style="width:100%;margin-top:3px;">
+            ${versions.map((version) => `<option value="${UTILS.escapeHTML(version.id)}" ${version.id === workspace.selectedResumeVersionId ? 'selected' : ''}>${UTILS.escapeHTML(version.label || version.filename || version.id)}</option>`).join('')}
+          </select>
+        </label>`
+      : '<div style="font-size:11px;margin-top:6px;">No workspace resume version is available; file fields will stay manual.</div>';
+    return `
+      <div class="autoapply-workspace-context">
+        <div class="autoapply-context-label">Resume for this application</div>
+        ${versionSelect}
+        ${policyText ? `<div style="font-size:11px;margin-top:6px;color:#f5c451;">Policy: ${UTILS.escapeHTML(policyText)}</div>` : ''}
+      </div>
+    `;
+  }
+
+  function base64ToBytes(base64) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  }
+
+  async function attachSelectedResume(el) {
+    if (el.type !== 'file') {
+      return { ok: false, reason: 'This upload control is not a native file input.' };
+    }
+    if (!workspace.selectedResumeVersionId) {
+      FILLER.highlightUploadField?.(el);
+      return { ok: false, reason: 'Choose a workspace resume version, or select the file manually.' };
+    }
+    try {
+      const response = await browser.runtime.sendMessage({
+        type: 'FETCH_RESUME_VERSION',
+        version_id: workspace.selectedResumeVersionId,
+      });
+      if (!response || response.status !== 'success' || !response.file?.base64) {
+        throw new Error(response?.error || 'Resume download failed.');
+      }
+      if (typeof DataTransfer === 'undefined') throw new Error('This browser does not allow automatic file attachment.');
+      const file = new File(
+        [base64ToBytes(response.file.base64)],
+        response.file.filename || 'resume.pdf',
+        { type: response.file.contentType || 'application/pdf' }
+      );
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      el.files = transfer.files;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { ok: true };
+    } catch (error) {
+      FILLER.highlightUploadField?.(el);
+      return { ok: false, reason: `${error.message || 'Automatic attachment failed.'} Select the file manually.` };
+    }
+  }
+
+  async function saveWorkspacePacket(stage, fillResult = null) {
+    if (!workspace.opportunityId) return null;
+    try {
+      const coverInstruction = currentInstructions.find((instruction) => {
+        const field = pageFields.find((candidate) => candidate.id === instruction.field_id);
+        return /cover[ _-]?letter/i.test(`${field?.label || ''} ${field?.name || ''}`);
+      });
+      const response = await UTILS.workspaceCall('/application-packets', 'POST', {
+        id: workspace.packetId || undefined,
+        opportunity_id: workspace.opportunityId,
+        resume_version_id: workspace.selectedResumeVersionId,
+        stage,
+        page_url: window.location.href,
+        instructions: currentInstructions,
+        field_failures: fillResult?.failures || Array.from(fieldFailures.values()),
+        cover_letter: coverInstruction?.value || null,
+        form_snapshot: { company: companyName, role: roleName, page_title: document.title },
+      });
+      workspace.packetId = workspaceId(response, 'packet') || workspace.packetId;
+      const opportunityStatus = ['submitted_by_user'].includes(stage) ? 'submitted' : 'ready_to_review';
+      await UTILS.workspaceCall(`/opportunities/${encodeURIComponent(workspace.opportunityId)}`, 'PATCH', {
+        status: opportunityStatus,
+        fit_score: jobAnalysis?.score ?? undefined,
+      });
+      return response;
+    } catch (error) {
+      console.warn('[AutoApply] Workspace packet was not saved:', error);
+      return null;
+    }
+  }
+
+  async function captureTeach(field, originalValue, correctedValue) {
+    const failure = fieldFailures.get(field.id);
+    if (!workspace.opportunityId || (!failure && originalValue === correctedValue)) return;
+    try {
+      await UTILS.workspaceCall('/teaches', 'POST', {
+        opportunity_id: workspace.opportunityId,
+        packet_id: workspace.packetId,
+        url: window.location.href,
+        field: { id: field.id, label: field.label || field.name || '', type: field.type },
+        proposed_value: originalValue,
+        corrected_value: correctedValue,
+        failure_reason: failure?.reason || null,
+      });
+      fieldFailures.delete(field.id);
+    } catch (error) {
+      console.warn('[AutoApply] Teach capture was not saved:', error);
+    }
+  }
+
+  function submissionReceipt() {
+    const text = document.body?.innerText || '';
+    const match = text.match(/(application (?:has been )?(?:submitted|received)|thank you for applying|we received your application)/i);
+    return { url: window.location.href, title: document.title, confirmation_text: match ? match[1] : '' };
+  }
+
+  async function confirmManualSubmission() {
+    if (!window.confirm('Confirm that you personally clicked the employer’s Submit button. AutoApply will only save a receipt; it will not submit anything.')) return;
+    await saveWorkspacePacket('submitted_by_user');
+    if (!workspace.opportunityId || !workspace.packetId) {
+      showStatus('Submission was not recorded because the workspace service is unavailable.', true);
+      return;
+    }
+    try {
+      const response = await UTILS.workspaceCall('/submissions/confirm', 'POST', {
+        opportunity_id: workspace.opportunityId,
+        packet_id: workspace.packetId,
+        submitted_at: new Date().toISOString(),
+        receipt: submissionReceipt(),
+        user_confirmed: true,
+      });
+      receiptRecorded = true;
+      showStatus(`Manual submission saved${response?.receipt?.id ? ' with receipt' : ''}.`, false);
+      renderMainUI();
+    } catch (error) {
+      showStatus(`Could not save the manual submission receipt: ${error.message}`, true);
+    }
+  }
 
   // Drag state
   let dragOffsetX = 0, dragOffsetY = 0, isDragging = false;
@@ -44,8 +281,11 @@
    * Start the scan, analysis, and fill-preparation flow.
    */
   async function startScanningFlow() {
-    window.__autoapply_active = true;
     removeOverlay();
+    removeReadyChip();
+    window.__autoapply_active = true;
+    hasFilledCurrentPage = false;
+    lastFillSnapshot = [];
 
     // Create shadow DOM host to isolate overlay from host page CSS
     shadowHost = document.createElement('div');
@@ -68,9 +308,10 @@
     // Create the overlay container element inside shadow root
     overlayContainer = document.createElement('div');
     overlayContainer.className = 'autoapply-overlay';
+    applyOverlayTheme();
     shadowRoot.appendChild(overlayContainer);
 
-    showLoading('Scanning form & analyzing job fit...');
+    showLoading('Scanning this page and preparing your review…');
 
     try {
       const scrapeResult = SCRAPER.scrapeFormFields();
@@ -93,47 +334,139 @@
       .replace(/Apply for|Job Application for|Opening for/i, '')
       .trim();
 
-    const formSchema = {
-      url,
-      platform,
-      page_title: title,
-      step: 1,
-      total_steps: 1,
-      fields: pageFields,
-      job_description: jdText
-    };
-
-    // Sequential calls to backend to avoid rate limiting
-    const executeBackendCalls = async () => {
-      try {
-        cachedDuplicateRes = await UTILS.apiCall(
-          `/api/applications/check-duplicate?url=${encodeURIComponent(url)}&company=${encodeURIComponent(companyName)}&role=${encodeURIComponent(roleName)}`
-        );
-        
-        const autofillRes = await UTILS.apiCall('/api/autofill', 'POST', formSchema);
-        
-        currentInstructions = autofillRes.instructions || [];
-        
-        // Cache original values to track corrections
-        originalInstructionsMap.clear();
-        currentInstructions.forEach(inst => {
-          originalInstructionsMap.set(inst.field_id, inst.value);
-        });
-
-        renderMainUI();
-      } catch (err) {
-        console.error('[AutoApply] Backend connection error:', err);
-        if (err.message.includes('404')) {
-          showError('No profile loaded. Please open the extension popup and upload your resume first!');
-        } else if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
-          showError('Cannot connect to AutoApply backend. Please make sure the local server is running on port 8000.');
-        } else {
-          showError(`Error contacting backend: ${err.message}`);
-        }
+    try {
+      const context = await loadWorkspaceContext();
+      if (context?.duplicates?.length) {
+        cachedDuplicateRes = { is_duplicate: true, existing: context.duplicates[0] };
+        showDuplicateChoice(context.duplicates);
+        return;
       }
-    };
+      await prepareCurrentPage({ url, title, platform });
+    } catch (err) {
+      console.error('[AutoApply] Backend connection error:', err);
+      if (err.message.includes('404')) showError('Finish profile setup before preparing this application.');
+      else if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) showError('Start the local AutoApply backend on port 8000, then try again.');
+      else showError(`Could not prepare this application: ${err.message}`);
+    }
+  }
 
-    await executeBackendCalls();
+  async function prepareCurrentPage({ url = window.location.href, title = document.title, platform = UTILS.detectPlatform(window.location.href), analyzeFit = true } = {}) {
+    const formSchema = {
+      url, platform, page_title: title, step: 1, total_steps: 1,
+      fields: pageFields, job_description: jdText,
+      opportunity_id: workspace.opportunityId,
+      resume_version_id: workspace.selectedResumeVersionId,
+    };
+    const autofillRes = await UTILS.apiCall('/api/autofill', 'POST', formSchema);
+    currentInstructions = autofillRes.instructions || [];
+    preparationSummary = {
+      ready_count: autofillRes.ready_count || currentInstructions.filter((item) => !item.review_required).length,
+      review_count: autofillRes.review_count || currentInstructions.filter((item) => item.review_required).length,
+      skipped_count: autofillRes.skipped_count || currentInstructions.filter((item) => item.action === 'skip').length,
+    };
+    originalInstructionsMap.clear();
+    currentInstructions.forEach((inst) => originalInstructionsMap.set(inst.field_id, inst.value));
+    renderMainUI();
+    await saveWorkspacePacket('ready_to_review');
+    if (analyzeFit && jdText && jdText.length >= 100) analyzeFitProgressively();
+    return autofillRes;
+  }
+
+  async function analyzeFitProgressively() {
+    try {
+      const analysis = await UTILS.apiCall('/api/analyze-job', 'POST', { job_description: jdText });
+      if (analysis?.recommendation === 'unknown' && analysis?.score === 0) return;
+      jobAnalysis = analysis;
+      if (workspace.opportunityId) {
+        await UTILS.workspaceCall(`/opportunities/${encodeURIComponent(workspace.opportunityId)}`, 'PATCH', { fit_score: analysis.score });
+      }
+      if (overlayContainer && !overlayContainer.querySelector('.autoapply-field-input')) renderMainUI();
+    } catch (error) {
+      console.warn('[AutoApply] Fit analysis is unavailable:', error);
+    }
+  }
+
+  function showDuplicateChoice(matches) {
+    if (!overlayContainer) return;
+    const first = matches[0];
+    overlayContainer.innerHTML = `
+      <div class="autoapply-header"><div class="autoapply-logo">${BRAND_MARK}<span>AutoApply</span></div><button class="autoapply-header-btn autoapply-close-btn" title="Close">✕</button></div>
+      <div class="autoapply-duplicate-choice"><p class="autoapply-kicker">Already tracked?</p><h2>${UTILS.escapeHTML(first.company || companyName)} · ${UTILS.escapeHTML(first.role || roleName)}</h2><p>${UTILS.escapeHTML(first.match_reason || 'This looks like an application already in your workspace.')}</p><div class="autoapply-choice-actions"><button class="autoapply-btn autoapply-btn-primary autoapply-reuse-btn">Open tracked application</button><button class="autoapply-btn autoapply-btn-secondary autoapply-new-attempt-btn">Create another attempt</button></div></div>`;
+    overlayContainer.querySelector('.autoapply-close-btn').addEventListener('click', removeOverlay);
+    overlayContainer.querySelector('.autoapply-reuse-btn').addEventListener('click', async () => {
+      showLoading('Opening the tracked application…');
+      try {
+        const response = await browser.runtime.sendMessage({ type:'OPEN_WORKSPACE_RECORD', opportunity_id:first.id });
+        if (response?.status !== 'success') throw new Error(response?.error || 'Could not open the workspace record.');
+        removeOverlay();
+      }
+      catch (error) { showError(error.message); }
+    });
+    overlayContainer.querySelector('.autoapply-new-attempt-btn').addEventListener('click', async () => {
+      showLoading('Preparing another attempt…');
+      try { await loadWorkspaceContext({ duplicateResolution:'create_new' }); await prepareCurrentPage(); }
+      catch (error) { showError(error.message); }
+    });
+  }
+
+  async function prepareApplicationSilently(message = {}) {
+    try {
+      const scrapeResult = SCRAPER.scrapeFormFields();
+      pageFields = scrapeResult.fields;
+      jdText = scrapeResult.job_description;
+      const url = window.location.href;
+      const title = document.title;
+      const platform = UTILS.detectPlatform(url);
+      companyName = UTILS.extractCompany(url, title);
+      roleName = title.split(/ - | at | \| /i)[0].replace(/Apply for|Job Application for|Opening for/i, '').trim();
+      const context = await loadWorkspaceContext({ duplicateResolution:message.duplicate_resolution || '', existingId:message.existing_id || null });
+      if (context?.duplicates?.length && !message.duplicate_resolution) {
+        return { ok:true, status:'duplicate', matches:context.duplicates, title:`${roleName} · ${companyName}` };
+      }
+      const result = await prepareCurrentPage({ url, title, platform, analyzeFit:false });
+      if (jdText && jdText.length >= 100) {
+        try {
+          const analysis = await UTILS.apiCall('/api/analyze-job', 'POST', { job_description:jdText });
+          if (analysis?.recommendation !== 'unknown' && workspace.opportunityId) {
+            jobAnalysis = analysis;
+            await UTILS.workspaceCall(`/opportunities/${encodeURIComponent(workspace.opportunityId)}`, 'PATCH', { fit_score:analysis.score });
+          }
+        } catch (_) { /* Fit is intentionally non-blocking. */ }
+      }
+      return { ok:true, status:'ready', opportunity_id:workspace.opportunityId, reused:Boolean(context?.opportunity?.reused), title:`${roleName} · ${companyName}`, fit_score:jobAnalysis?.score, ready_count:result.ready_count, review_count:result.review_count };
+    } catch (error) {
+      return { ok:false, error:error.message || 'Preparation failed' };
+    }
+  }
+
+  function looksLikeApplicationPage() {
+    if (!/^https?:/i.test(window.location.href)) return false;
+    const identity = `${window.location.href} ${document.title}`.toLowerCase();
+    const knownPage = /(workdayjobs|greenhouse|lever\.co|ashbyhq|icims|smartrecruiters|taleo|oraclecloud|darwinbox|keka|\/apply(?:\/|\?|$)|application)/.test(identity);
+    const visibleFields = [...document.querySelectorAll('input:not([type="hidden"]),select,textarea')]
+      .filter((element) => element.offsetParent !== null && !element.disabled).length;
+    return knownPage && visibleFields >= 2;
+  }
+
+  function removeReadyChip() {
+    if (readyChipHost) readyChipHost.remove();
+    readyChipHost = null;
+  }
+
+  function mountReadyChip() {
+    if (readyChipHost || window.__autoapply_active || !looksLikeApplicationPage()) return;
+    readyChipHost = document.createElement('div');
+    readyChipHost.id = 'autoapply-ready-chip-host';
+    document.body.appendChild(readyChipHost);
+    const root = readyChipHost.attachShadow({ mode:'open' });
+    const dark = resolvedTheme() === 'dark';
+    const chipColors = dark
+      ? { text:'#edf2f7', background:'#151d28', border:'#3c4b5e', hover:'#202b39', action:'#526ce7', focus:'#9aaeff' }
+      : { text:'#19233a', background:'#ffffff', border:'#bcc6da', hover:'#e8edfa', action:'#3157d5', focus:'rgba(49,87,213,.45)' };
+    root.innerHTML = `<style>
+      button{position:fixed;right:18px;bottom:18px;z-index:2147483647;display:flex;align-items:center;gap:9px;min-height:44px;padding:0 14px;border:1px solid ${chipColors.border};border-radius:8px;color:${chipColors.text};background:${chipColors.background};box-shadow:0 16px 42px rgba(0,0,0,.25);font:750 12px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer}
+      button:hover{border-color:${chipColors.action};background:${chipColors.hover}}.autoapply-logo-icon{display:block;width:22px;height:22px;filter:drop-shadow(2px 2px 0 rgba(0,0,0,.16));transform:rotate(-1deg)}.autoapply-logo-icon svg{display:block;width:100%;height:100%}button:focus-visible{outline:3px solid ${chipColors.focus};outline-offset:3px}@media(prefers-reduced-motion:no-preference){button{animation:arrive .28s ease-out}@keyframes arrive{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}}</style><button type="button" aria-label="Prepare this application with AutoApply">${BRAND_MARK}Ready to prepare</button>`;
+    root.querySelector('button').addEventListener('click', startScanningFlow);
   }
 
   /**
@@ -157,6 +490,7 @@
       activeObserver = null;
     }
     window.__autoapply_active = false;
+    setTimeout(mountReadyChip, 350);
   }
 
   /**
@@ -167,7 +501,7 @@
     overlayContainer.innerHTML = `
       <div class="autoapply-header">
         <div class="autoapply-logo">
-          <div class="autoapply-logo-icon">A</div>
+          ${BRAND_MARK}
           <span>AutoApply</span>
         </div>
         <div class="autoapply-header-actions">
@@ -191,7 +525,7 @@
     overlayContainer.innerHTML = `
       <div class="autoapply-header">
         <div class="autoapply-logo">
-          <div class="autoapply-logo-icon">A</div>
+          ${BRAND_MARK}
           <span>AutoApply</span>
         </div>
         <div class="autoapply-header-actions">
@@ -217,12 +551,15 @@
       return;
     }
 
-    // Build the container HTML structure
+    const pageState = FILLER.isLastPage();
+    const confirmation = isSubmissionConfirmationPage();
+    const primaryLabel = confirmation ? 'Record submission' : hasFilledCurrentPage && pageState.isLast
+      ? 'Review final page on employer site' : pageState.isLast ? 'Fill reviewed fields' : 'Fill & continue';
     overlayContainer.className = 'autoapply-overlay';
     overlayContainer.innerHTML = `
       <div class="autoapply-header">
         <div class="autoapply-logo">
-          <div class="autoapply-logo-icon">A</div>
+          ${BRAND_MARK}
           <span>AutoApply</span>
         </div>
         <div class="autoapply-header-actions">
@@ -231,21 +568,24 @@
         </div>
       </div>
 
+      <div class="autoapply-opportunity-heading">
+        <p class="autoapply-kicker">Preparing now</p>
+        <h2>${UTILS.escapeHTML(companyName || 'Company')} · ${UTILS.escapeHTML(roleName || 'Role')}</h2>
+        <div class="autoapply-prep-summary"><span>${preparationSummary.ready_count} ready</span><span>${preparationSummary.review_count} review</span><span>${preparationSummary.skipped_count} skipped</span></div>
+      </div>
       ${renderDuplicateWarning(cachedDuplicateRes)}
+      ${renderWorkspaceContext()}
       ${renderFitScoreSection()}
-
-      <div class="autoapply-step-indicator">
-        Review Autofill Fields (${pageFields.length} found)
-      </div>
-
       <div class="autoapply-fields">
-        ${pageFields.map((field, idx) => renderFieldRow(field, idx)).join('')}
+        ${renderFieldGroups()}
       </div>
-
       <div class="autoapply-footer">
-        <button class="autoapply-btn autoapply-btn-secondary autoapply-fill-only-btn">Fill Only</button>
-        <button class="autoapply-btn autoapply-btn-primary autoapply-advance-btn">Fill & Next ➔</button>
-        <button class="autoapply-btn autoapply-autopilot-btn">AutoPilot</button>
+        <button class="autoapply-btn autoapply-btn-primary autoapply-primary-action-btn" ${hasFilledCurrentPage && pageState.isLast && !confirmation ? 'disabled' : ''}>${primaryLabel}</button>
+        <details class="autoapply-more-actions"><summary aria-label="More actions">•••</summary><div class="autoapply-action-menu">
+          <button type="button" class="autoapply-fill-only-btn">Fill without continuing</button>
+          ${lastFillSnapshot.length ? '<button type="button" class="autoapply-undo-btn">Undo last fill</button>' : ''}
+          <button type="button" class="autoapply-autopilot-btn" ${policyBlocksAutopilot() ? 'disabled title="Blocked by workspace policy"' : ''}>Continue automatically</button>
+        </div></details>
       </div>
     `;
 
@@ -291,17 +631,24 @@
       });
     });
 
-    // Action button events
-    overlayContainer.querySelector('.autoapply-fill-only-btn').addEventListener('click', () => {
-      handleFill(false);
+    overlayContainer.querySelector('.autoapply-primary-action-btn').addEventListener('click', () => {
+      if (confirmation) confirmManualSubmission();
+      else handleFill(!pageState.isLast);
     });
+    overlayContainer.querySelector('.autoapply-fill-only-btn')?.addEventListener('click', () => handleFill(false));
+    overlayContainer.querySelector('.autoapply-autopilot-btn')?.addEventListener('click', runAutoPilot);
+    overlayContainer.querySelector('.autoapply-undo-btn')?.addEventListener('click', undoLastFill);
 
-    overlayContainer.querySelector('.autoapply-advance-btn').addEventListener('click', () => {
-      handleFill(true);
-    });
-
-    overlayContainer.querySelector('.autoapply-autopilot-btn').addEventListener('click', () => {
-      runAutoPilot();
+    const resumeVersion = overlayContainer.querySelector('.autoapply-resume-version');
+    if (resumeVersion) {
+      resumeVersion.addEventListener('change', (event) => {
+        workspace.selectedResumeVersionId = event.target.value || null;
+      });
+    }
+    overlayContainer.querySelectorAll('.autoapply-recover-btn').forEach((btn) => {
+      btn.addEventListener('click', (event) => {
+        startEditingField(parseInt(event.currentTarget.getAttribute('data-idx'), 10));
+      });
     });
 
     // Cover letter button events
@@ -313,6 +660,22 @@
     });
   }
 
+  function isSubmissionConfirmationPage() {
+    if (receiptRecorded) return false;
+    const text = document.body?.innerText || '';
+    return /(application (?:has been )?(?:submitted|received)|thank you for applying|we received your application)/i.test(text);
+  }
+
+  function renderFieldGroups() {
+    const entries = pageFields.map((field, idx) => ({ field, idx, instruction:currentInstructions.find((item) => item.field_id === field.id) || { action:'skip', review_required:true } }));
+    const groups = [
+      ['review', 'Needs review', 'Check these before filling', entries.filter((entry) => entry.instruction.review_required && entry.instruction.action !== 'skip'), true],
+      ['ready', 'Ready to fill', 'Verified profile facts and approved answers', entries.filter((entry) => !entry.instruction.review_required && entry.instruction.action !== 'skip'), false],
+      ['skipped', 'Skipped', 'Left untouched by policy or missing information', entries.filter((entry) => entry.instruction.action === 'skip'), false],
+    ];
+    return groups.filter(([, , , items]) => items.length).map(([kind, title, copy, items, open]) => `<details class="autoapply-field-group autoapply-field-group-${kind}" ${open ? 'open' : ''}><summary><span><strong>${title}</strong><small>${copy}</small></span><b>${items.length}</b></summary><div>${items.map((entry) => renderFieldRow(entry.field, entry.idx)).join('')}</div></details>`).join('') || '<div class="autoapply-empty-fields">No fillable fields were found on this page.</div>';
+  }
+
   /**
    * Renders the minimized toggle button.
    */
@@ -320,7 +683,7 @@
     overlayContainer.className = 'autoapply-overlay autoapply-minimized';
     overlayContainer.innerHTML = `
       <div class="autoapply-mini-btn">
-        <div class="autoapply-logo-icon">A</div>
+        ${BRAND_MARK}
         <span>AutoApply (Click to Expand)</span>
       </div>
     `;
@@ -419,8 +782,8 @@
     if (!jobAnalysis) {
       if (!jdText) return '';
       return `
-        <div class="autoapply-fit-section" style="text-align: center; padding: 12px 16px;">
-          <button class="autoapply-btn autoapply-btn-secondary autoapply-analyze-btn" style="width: 100%;">Analyze Job Fit (AI)</button>
+        <div class="autoapply-fit-section autoapply-fit-loading">
+          <span class="autoapply-fit-pulse"></span><span>Fit analysis is loading in the background…</span>
         </div>
       `;
     }
@@ -477,20 +840,29 @@
 
     const coverLetterBtnHtml = isCoverLetter ? `
       <div style="margin-top: 6px;">
-        <button class="autoapply-btn autoapply-gen-cover-btn" data-idx="${idx}" style="font-size: 11px; padding: 4px 8px; width: auto; background: linear-gradient(135deg, #667eea, #764ba2); height: auto; border: none; border-radius: 4px; color: #fff; cursor: pointer;">
+        <button class="autoapply-btn autoapply-gen-cover-btn" data-idx="${idx}" style="font-size: 11px; padding: 4px 8px; width: auto; height: auto; cursor: pointer;">
           ✍ Generate Cover Letter
         </button>
       </div>
     ` : '';
+    const failure = fieldFailures.get(field.id);
+    const recoveryHtml = failure ? `
+      <div style="margin-top:6px;font-size:11px;color:#fca5a5;">Could not fill: ${UTILS.escapeHTML(failure.reason)}</div>
+      <button class="autoapply-recover-btn" data-idx="${idx}" style="margin-top:4px;font-size:11px;">Edit &amp; teach recovery</button>
+    ` : '';
+    const source = inst.source || (inst.action === 'skip' ? 'policy' : 'ai');
+    const sourceLabel = source.startsWith('profile') ? 'Verified profile' : source.startsWith('answer_vault') ? 'Approved answer' : source.startsWith('resume') ? 'Resume file' : source.startsWith('learned') ? 'Learned correction' : source.startsWith('policy') ? 'Review policy' : 'AI suggestion';
 
     return `
       <div class="autoapply-field-row" id="row_${idx}">
         <div class="${dotClass}" title="Confidence: ${inst.confidence || 'unknown'}"></div>
         <div class="autoapply-field-info">
-          <div class="autoapply-field-label">${UTILS.escapeHTML(field.label || field.placeholder || field.name || 'Unnamed Field')} ${field.required ? '<span style="color:#f87171">*</span>' : ''}</div>
+          <div class="autoapply-field-label">${UTILS.escapeHTML(field.label || field.placeholder || field.name || 'Unnamed Field')} ${field.required ? '<span style="color:#c84545">*</span>' : ''}</div>
           <div class="${valClass}" id="val_${idx}">${UTILS.escapeHTML(displayValue)}</div>
+          <div class="autoapply-field-source">${UTILS.escapeHTML(sourceLabel)} · ${UTILS.escapeHTML(inst.confidence || 'unknown')} confidence</div>
           ${toggleHtml}
           ${coverLetterBtnHtml}
+          ${recoveryHtml}
         </div>
         <button class="autoapply-edit-btn" data-idx="${idx}" title="Edit Value">✎</button>
       </div>
@@ -613,6 +985,7 @@
     inst.value = newValue;
     inst.action = newValue ? (field.type === 'select' ? 'select' : 'fill') : 'skip';
     inst.confidence = 'high';
+    inst.review_required = false;
 
     // Log correction if the value actually changed from the original agent proposal
     if (newValue !== oldValue) {
@@ -632,23 +1005,69 @@
           console.error('[AutoApply] Failed to log correction:', err);
         });
     }
+    captureTeach(field, oldValue, newValue);
+    saveWorkspacePacket('ready_to_review');
 
     // Refresh UI to display updated value
     renderMainUI();
+  }
+
+  async function fillCurrentInstructions(stage) {
+    fieldFailures.clear();
+    lastFillSnapshot = currentInstructions.map((instruction) => {
+      const field = pageFields.find((candidate) => candidate.id === instruction.field_id);
+      const element = document.getElementById(instruction.field_id) || document.querySelector(`[data-autoapply-id="${CSS.escape(instruction.field_id)}"]`);
+      if (!field || !element || field.type === 'file' || instruction.action === 'skip') return null;
+      return {
+        element,
+        type: field.type,
+        value: element.hasAttribute?.('contenteditable') ? element.textContent : element.value,
+        checked: Boolean(element.checked),
+      };
+    }).filter(Boolean);
+    const result = await FILLER.fillAllFields(currentInstructions, {
+      uploadHandler: attachSelectedResume,
+    });
+    for (const failure of result.failures || []) fieldFailures.set(failure.field_id, failure);
+    await saveWorkspacePacket(stage, result);
+    return result;
+  }
+
+  function undoLastFill() {
+    if (!lastFillSnapshot.length) return;
+    for (const snapshot of lastFillSnapshot) {
+      const { element } = snapshot;
+      if (!element?.isConnected) continue;
+      if (snapshot.type === 'checkbox' || snapshot.type === 'radio') element.checked = snapshot.checked;
+      else if (element.hasAttribute?.('contenteditable')) element.textContent = snapshot.value || '';
+      else element.value = snapshot.value || '';
+      element.dispatchEvent(new Event('input', { bubbles:true }));
+      element.dispatchEvent(new Event('change', { bubbles:true }));
+    }
+    lastFillSnapshot = [];
+    hasFilledCurrentPage = false;
+    renderMainUI();
+    showStatus('Restored the values from before the last fill.', false);
   }
 
   /**
    * Run the AutoPilot loop: scrape, get backend instructions, fill, advance, detect page change, and repeat.
    */
   async function runAutoPilot() {
+    if (policyBlocksAutopilot()) {
+      showStatus(`AutoPilot is blocked by policy. ${policyMessage()}`.trim(), true);
+      return;
+    }
     autopilotActive = true;
     autopilotStep = 0;
+    autopilotState = 'running';
+    autopilotMessage = '';
     
     while (autopilotActive) {
       autopilotStep++;
       
       if (autopilotStep > MAX_AUTOPILOT_STEPS) {
-        stopAutoPilot('Stopped: exceeded maximum steps (possible loop)');
+        stopAutoPilot('Stopped: exceeded maximum steps (possible loop)', 'failed');
         return;
       }
       
@@ -660,7 +1079,7 @@
         pageFields = scrapeResult.fields;
         jdText = scrapeResult.job_description || jdText;
       } catch (err) {
-        stopAutoPilot(`Scraper error: ${err.message}`);
+        stopAutoPilot(`Scraper error: ${err.message}`, 'failed');
         return;
       }
       
@@ -670,7 +1089,7 @@
         await new Promise(r => setTimeout(r, 1000));
         const lastCheck = FILLER.isLastPage();
         if (lastCheck.isLast) {
-          stopAutoPilot('AutoPilot complete. Review and submit manually.');
+          stopAutoPilot('AutoPilot complete. Review and submit manually.', 'ready_to_review');
           logApplicationToHistory();
           return;
         }
@@ -687,24 +1106,31 @@
       const formSchema = {
         url, platform, page_title: title,
         step: autopilotStep, total_steps: 1,
-        fields: pageFields, job_description: jdText
+        fields: pageFields, job_description: jdText,
+        opportunity_id: workspace.opportunityId,
+        resume_version_id: workspace.selectedResumeVersionId
       };
       
       try {
         const autofillRes = await UTILS.apiCall('/api/autofill', 'POST', formSchema);
         currentInstructions = autofillRes.instructions || [];
       } catch (err) {
-        stopAutoPilot(`Backend error: ${err.message}`);
+        stopAutoPilot(`Backend error: ${err.message}`, 'failed');
         return;
       }
       
       if (!autopilotActive) return; // User clicked stop during API call
       
       // 3. Fill all fields
-      const result = await FILLER.fillAllFields(currentInstructions);
+      const result = await fillCurrentInstructions('autopilot_filled');
       showAutoPilotStatus(
-        `Page ${autopilotStep}: Filled ${result.filled}, skipped ${result.skipped}`
+        `Page ${autopilotStep}: Filled ${result.filled}, skipped ${result.skipped}, failed ${result.failed}`
       );
+      if (result.failed) {
+        stopAutoPilot('Stopped for field recovery. Review the failed fields; nothing was submitted.', 'failed');
+        renderMainUI();
+        return;
+      }
       
       // 4. Wait for React/Angular to settle
       await new Promise(r => setTimeout(r, 800));
@@ -713,7 +1139,9 @@
       const lastPageInfo = FILLER.isLastPage();
       if (lastPageInfo.isLast) {
         autopilotActive = false;
-        showAutoPilotStatus(`AutoPilot complete (${lastPageInfo.reason}). Review and submit manually.`);
+        autopilotState = 'ready_to_review';
+        autopilotMessage = `AutoPilot complete (${lastPageInfo.reason}). Review and submit manually.`;
+        showAutoPilotStatus(autopilotMessage);
         logApplicationToHistory();
         // Re-render the full UI so user can review final page
         renderMainUI();
@@ -723,7 +1151,7 @@
       // 6. Click next and wait for page change
       const clicked = FILLER.clickNextButton();
       if (!clicked) {
-        stopAutoPilot('Could not find a Next/Continue button.');
+        stopAutoPilot('Could not find a safe Next/Continue button.', 'failed');
         return;
       }
       
@@ -759,8 +1187,10 @@
   /**
    * Stop AutoPilot and optionally show a status message.
    */
-  function stopAutoPilot(message) {
+  function stopAutoPilot(message, outcome = 'stopped') {
     autopilotActive = false;
+    autopilotState = outcome;
+    autopilotMessage = message || '';
     if (message) showAutoPilotStatus(message);
   }
 
@@ -772,7 +1202,7 @@
     overlayContainer.innerHTML = `
       <div class="autoapply-header">
         <div class="autoapply-logo">
-          <div class="autoapply-logo-icon">A</div>
+          ${BRAND_MARK}
           <span>AutoApply</span>
         </div>
         <div class="autoapply-header-actions">
@@ -807,25 +1237,11 @@
     if (closeFinalBtn) closeFinalBtn.addEventListener('click', removeOverlay);
   }
 
-  /**
-   * Log the successfully filled application to history.
-   */
+  /** Save a prepared application without claiming it was submitted. */
   function logApplicationToHistory() {
-    const appData = {
-      company: companyName || 'Unknown',
-      role: roleName || 'Unknown',
-      url: window.location.href,
-      platform: UTILS.detectPlatform(window.location.href),
-      fit_score: jobAnalysis ? jobAnalysis.score : null,
-      status: 'applied',
-      job_description_snippet: jdText ? jdText.slice(0, 200) : ''
-    };
-    UTILS.apiCall('/api/applications/', 'POST', appData)
+    saveWorkspacePacket('ready_to_review')
       .then(() => {
-        browser.runtime.sendMessage({
-          type: 'APP_LOGGED',
-          data: { company: appData.company, role: appData.role }
-        });
+        showStatus('Saved for review. AutoApply did not submit anything.', false);
       })
       .catch(err => {
         console.error('[AutoApply] Failed to log application:', err);
@@ -881,8 +1297,14 @@
     }
 
     // 1. Programmatically fill all inputs on the active DOM
-    const result = await FILLER.fillAllFields(currentInstructions);
+    const result = await fillCurrentInstructions(advance ? 'filled_for_next' : 'filled_for_review');
+    hasFilledCurrentPage = result.filled > 0;
     showStatus(`Filled ${result.filled}, skipped ${result.skipped}, failed ${result.failed}`, result.failed > 0);
+    if (result.failed) {
+      renderMainUI();
+      showStatus('Resolve the highlighted field failures before continuing. Nothing was submitted.', true);
+      return;
+    }
 
     if (advance) {
       // Small delay to ensure all async React/Angular updates settle
@@ -905,30 +1327,8 @@
         showStatus('Filled fields, but no Next/Continue button could be detected.', true);
       }
     } else {
-      // Final step or user decided to fill without navigating.
-      // Log the job application in history.
-      const appData = {
-        company: companyName || 'Unknown',
-        role: roleName || 'Unknown',
-        url: window.location.href,
-        platform: UTILS.detectPlatform(window.location.href),
-        fit_score: jobAnalysis ? jobAnalysis.score : null,
-        status: 'applied',
-        job_description_snippet: jdText ? jdText.slice(0, 200) : ''
-      };
-
-      UTILS.apiCall('/api/applications/', 'POST', appData)
-        .then(res => {
-          showStatus('Fields filled and application logged in history!', false);
-          browser.runtime.sendMessage({
-            type: 'APP_LOGGED',
-            data: { company: appData.company, role: appData.role }
-          });
-        })
-        .catch(err => {
-          console.error('[AutoApply] Failed to log application:', err);
-          showStatus('Fields filled, but failed to log application in history.', true);
-        });
+      renderMainUI();
+      showStatus('Fields are filled. Review the employer page before submitting.', false);
     }
   }
 
@@ -972,14 +1372,38 @@
     } else if (message.type === 'GET_STATUS') {
       sendResponse({ status: window.__autoapply_active ? 'active' : 'idle' });
     } else if (message.type === 'START_AUTOPILOT') {
-      startScanningFlow().then(() => {
-        runAutoPilot();
-      });
+      autopilotState = 'starting';
+      autopilotMessage = '';
+      startScanningFlow()
+        .then(() => runAutoPilot())
+        .catch((err) => stopAutoPilot(`AutoPilot startup failed: ${err.message}`, 'failed'));
       sendResponse({ status: 'started' });
     } else if (message.type === 'GET_AUTOPILOT_STATUS') {
-      sendResponse({ autopilotActive, autopilotStep });
+      sendResponse({
+        autopilotActive,
+        autopilotStep,
+        autopilotState,
+        message: autopilotMessage
+      });
+    } else if (message.type === 'PREPARE_APPLICATION') {
+      prepareApplicationSilently(message).then(sendResponse);
+      return true;
     }
   });
 
+  colorScheme.addEventListener('change', () => {
+    if (themePreference !== 'system') return;
+    applyOverlayTheme();
+    if (readyChipHost) { removeReadyChip(); mountReadyChip(); }
+  });
+  browser.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes[THEME_KEY]) return;
+    themePreference = themeChoices.has(changes[THEME_KEY].newValue) ? changes[THEME_KEY].newValue : 'system';
+    applyOverlayTheme();
+    if (readyChipHost) { removeReadyChip(); mountReadyChip(); }
+  });
+
+  initializeTheme();
+  setTimeout(mountReadyChip, 700);
   console.log('[AutoApply] Review Overlay module loaded successfully.');
 })();
