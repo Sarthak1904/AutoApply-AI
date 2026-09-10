@@ -6,7 +6,7 @@
 const AutoApplyScraper = (() => {
   /**
    * Scrape all form fields and job description from the current page.
-   * @returns {{ fields: Array, job_description: string }}
+   * @returns {{ fields: Array, job_description: string, page_text: string }}
    */
   function scrapeFormFields() {
     const fields = [];
@@ -40,8 +40,9 @@ const AutoApplyScraper = (() => {
     });
 
     const jobDescription = extractJobDescription();
+    const pageText = extractVisiblePageText();
 
-    const result = { fields, job_description: jobDescription };
+    const result = { fields, job_description: jobDescription, page_text: pageText };
     window.__autoapply_scraper = result;
     return result;
   }
@@ -78,6 +79,7 @@ const AutoApplyScraper = (() => {
       max_length: el.maxLength > 0 ? el.maxLength : null,
       aria_label: el.getAttribute('aria-label') || null,
       group_name: null,
+      context: extractFieldContext(el),
     };
 
     // Handle select elements — extract options
@@ -117,6 +119,21 @@ const AutoApplyScraper = (() => {
   /** Never collect authentication, payment, or government-ID inputs. */
   function isSensitiveNonApplicationField(el, label, type) {
     if (type === 'password') return true;
+
+    // On Workday login/signup pages, never collect the sign-in email or username.
+    // This is an extra safety net — overlay.js already redirects auth pages before
+    // scraping begins, but defence-in-depth ensures no credentials reach the backend.
+    const workdayPage = typeof AutoApplyUtils !== 'undefined'
+      ? AutoApplyUtils.classifyWorkdayPage(window.location.href)
+      : null;
+    if (
+      (workdayPage === 'login' || workdayPage === 'signup') &&
+      (type === 'email' ||
+       (el.getAttribute('autocomplete') || '').toLowerCase().includes('username') ||
+       /\b(email|username|user[_-]?name)\b/.test([el.id, el.name, el.getAttribute('aria-label')].filter(Boolean).join(' ').toLowerCase()))
+    ) {
+      return true;
+    }
 
     const autocomplete = (el.getAttribute('autocomplete') || '').toLowerCase();
     const blockedAutocomplete = [
@@ -241,6 +258,39 @@ const AutoApplyScraper = (() => {
       .filter((line) => line.length > 1 && !noisyLine.test(line) && !/^\S+@\S+\.\S+$/.test(line));
     const deduped = lines.filter((line, index) => index === 0 || line !== lines[index - 1]);
     return deduped.join('\n').trim().slice(0, 6000);
+  }
+
+  function textLinesFromElement(element) {
+    const clone = element.cloneNode(true);
+    clone.querySelectorAll(
+      '#autoapply-shadow-host,#autoapply-ready-chip-host,script,style,noscript,svg,nav,header,footer,button,input,select,textarea,[role="navigation"],[role="banner"],[role="search"],[aria-hidden="true"]'
+    ).forEach((node) => node.remove());
+    const noisyLine = /^(skip to main content|sign in|settings|candidate home|search for jobs|back to job posting|apply now|autofill with resume|save and continue|continue|next|previous|back|submit|cancel)$/i;
+    const seen = new Set();
+    return (clone.innerText || clone.textContent || '')
+      .split(/\n+/)
+      .map((line) => line.replace(/\s+/g, ' ').trim())
+      .filter((line) => line.length > 1 && !noisyLine.test(line) && !/^\S+@\S+\.\S+$/.test(line))
+      .filter((line) => {
+        const key = line.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }
+
+  function extractVisiblePageText() {
+    if (!document.body) return '';
+    return textLinesFromElement(document.body).join('\n').slice(0, 12000);
+  }
+
+  function extractFieldContext(el) {
+    const container = el.closest(
+      'fieldset,[role="group"],[data-automation-id*="formField"],[data-testid*="form"],.form-group,.field,.question,.input-group,li,section,article,div'
+    );
+    if (!container || container === document.body) return '';
+    const text = textLinesFromElement(container).join(' ');
+    return text.slice(0, 1500);
   }
 
   /**
@@ -386,7 +436,7 @@ const AutoApplyScraper = (() => {
     return '';
   }
 
-  return { scrapeFormFields, extractJobDescription };
+  return { scrapeFormFields, extractJobDescription, extractVisiblePageText };
 })();
 
 if (typeof window !== 'undefined') {

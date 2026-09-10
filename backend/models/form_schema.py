@@ -18,6 +18,7 @@ class FormField(BaseModel):
     max_length: Optional[int] = Field(default=None, ge=0, le=1_000_000)
     aria_label: Optional[str] = Field(default=None, max_length=2_000)
     group_name: Optional[str] = Field(default=None, max_length=512)
+    context: Optional[str] = Field(default=None, max_length=5_000)
 
 
 class FormSchema(BaseModel):
@@ -29,6 +30,7 @@ class FormSchema(BaseModel):
     total_steps: Optional[int] = Field(default=None, ge=1, le=1_000)
     fields: list[FormField] = Field(default_factory=list, max_length=500)
     job_description: Optional[str] = Field(default=None, max_length=100_000)
+    page_text: Optional[str] = Field(default=None, max_length=100_000)
     opportunity_id: Optional[str] = Field(default=None, max_length=100)
     resume_version_id: Optional[str] = Field(default=None, max_length=100)
 

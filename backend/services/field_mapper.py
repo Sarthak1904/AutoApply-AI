@@ -175,11 +175,20 @@ class FieldMapper:
                 desc["placeholder"] = f.placeholder
             if f.max_length:
                 desc["max_length"] = f.max_length
+            if f.context:
+                desc["nearby_page_text"] = f.context[:1500]
             fields_desc.append(desc)
 
         jd_section = ""
         if form_schema.job_description:
             jd_section = f"\n\nJOB DESCRIPTION:\n{form_schema.job_description[:3000]}"
+
+        page_context_section = ""
+        if form_schema.page_text:
+            page_context_section = (
+                "\n\nVISIBLE PAGE TEXT FROM THIS APPLICATION STEP:\n"
+                f"{form_schema.page_text[:6000]}"
+            )
 
         # Add form step context if available
         step_context = ""
@@ -199,6 +208,7 @@ ADDITIONAL KNOWLEDGE ABOUT THE APPLICANT:
 {knowledge if knowledge else "(none provided)"}
 {corrections_text}
 {jd_section}
+{page_context_section}
 
 FORM FIELDS TO FILL:
 {json.dumps(fields_desc, indent=2)}
@@ -206,6 +216,7 @@ FORM FIELDS TO FILL:
 
 INSTRUCTIONS:
 1. Map each form field to the most appropriate value from the profile or knowledge.
+   Use the visible page text and nearby field text to understand what the page is asking.
 2. For dropdown/select fields, pick the CLOSEST matching option from the available choices.
    Return the exact option text that should be selected.
 3. For textarea/open-ended questions, write a thoughtful, specific, HUMAN-SOUNDING answer.

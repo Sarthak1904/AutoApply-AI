@@ -141,6 +141,61 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'GET_PROFILE_EMAIL') {
+    // Fetch just the email from the local profile — used for Workday login pre-fill.
+    // The email is read locally and never forwarded to any AI provider.
+    fetch('http://localhost:8000/api/profile', { signal: AbortSignal.timeout(10000) })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Profile fetch failed (${res.status}).`);
+        return res.json();
+      })
+      .then((profile) => {
+        const email =
+          profile?.email ||
+          profile?.personal_info?.email ||
+          profile?.contact?.email ||
+          null;
+        sendResponse({ status: 'success', email });
+      })
+      .catch((err) => sendResponse({ status: 'error', error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'GET_WORKDAY_CREDENTIALS') {
+    // Fetch saved Workday email+password from the local backend.
+    // Only accessible from localhost — never sent to any AI provider.
+    fetch('http://localhost:8000/api/credentials/workday', { signal: AbortSignal.timeout(10000) })
+      .then((res) => {
+        if (res.status === 404) return sendResponse({ status: 'not_found', email: null, password: null });
+        if (!res.ok) throw new Error(`Credentials fetch failed (${res.status}).`);
+        return res.json();
+      })
+      .then((data) => {
+        if (data && data.email) {
+          sendResponse({ status: 'success', email: data.email, password: data.password });
+        } else {
+          sendResponse({ status: 'not_found', email: null, password: null });
+        }
+      })
+      .catch((err) => sendResponse({ status: 'error', error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'GET_WORKDAY_OTP') {
+    // Poll the Gmail API via the local backend for a recent Workday OTP code.
+    const maxAge = message.max_age_minutes || 10;
+    fetch(`http://localhost:8000/api/gmail/otp?max_age_minutes=${maxAge}`, {
+      signal: AbortSignal.timeout(15000),
+    })
+      .then((res) => {
+        if (!res.ok) return res.json().then((err) => { throw new Error(err.detail || `HTTP ${res.status}`); });
+        return res.json();
+      })
+      .then((data) => sendResponse({ status: 'success', otp: data.otp, found: data.found }))
+      .catch((err) => sendResponse({ status: 'error', error: err.message }));
+    return true;
+  }
+
   if (message.type === 'OPEN_WORKSPACE_RECORD') {
     const opportunityId = String(message.opportunity_id || '').trim();
     if (!opportunityId) {

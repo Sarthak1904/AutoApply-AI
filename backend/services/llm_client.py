@@ -22,7 +22,7 @@ _backend_dir = Path(__file__).parent.parent
 load_dotenv(_backend_dir / ".env")
 
 DEFAULT_PROVIDER = "gemini"
-SUPPORTED_PROVIDERS = frozenset({"gemini", "openrouter"})
+SUPPORTED_PROVIDERS = frozenset({"gemini", "openrouter", "deepseek"})
 
 _PROVIDER_SETTINGS = {
     "gemini": {
@@ -34,6 +34,11 @@ _PROVIDER_SETTINGS = {
         "api_key_env": "OPENROUTER_API_KEY",
         "default_model": None,
         "model_env": "OPENROUTER_MODEL",
+    },
+    "deepseek": {
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "default_model": "deepseek-chat",
+        "model_env": "DEEPSEEK_MODEL",
     },
 }
 
@@ -225,6 +230,9 @@ def get_llm_client() -> LLMClient:
                 elif provider == "gemini":
                     from backend.services.gemini import GeminiClient
                     _client = GeminiClient()
+                elif provider == "deepseek":
+                    from backend.services.deepseek import DeepSeekClient
+                    _client = DeepSeekClient()
                 else:  # Defensive guard: inspect_provider_configuration validates this.
                     raise ValueError(f"Unsupported AI_PROVIDER '{provider}'.")
                 logger.info(

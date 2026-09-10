@@ -1,6 +1,8 @@
 import unittest
+from unittest.mock import patch
 
 from backend.models.form_schema import FormField, FormSchema
+from backend.models.profile import UserProfile
 from backend.services.field_mapper import FieldMapper
 
 
@@ -55,3 +57,45 @@ class FieldMapperValidationTests(unittest.TestCase):
         instructions = FieldMapper._validate_instructions(result, schema)
 
         self.assertEqual([(item.field_id, item.action) for item in instructions], [("short-answer", "skip")])
+
+    def test_llm_prompt_includes_visible_page_scan_and_field_context(self):
+        captured = {}
+
+        class FakeClient:
+            def generate_json(self, prompt, system_instruction):
+                captured["prompt"] = prompt
+                return [
+                    {
+                        "field_id": "question",
+                        "action": "skip",
+                        "confidence": "low",
+                        "reason": "Need user review",
+                    }
+                ]
+
+        class FakeDb:
+            def find_similar_answers(self, field_label, limit=3):
+                return []
+
+        schema = FormSchema(
+            url="https://example.test/apply",
+            page_text="Step 2 asks: Describe a time you improved a broken workflow.",
+            fields=[
+                FormField(
+                    id="question",
+                    type="textarea",
+                    label="Additional question",
+                    context="Describe a time you improved a broken workflow. 500 characters max.",
+                )
+            ],
+        )
+
+        with patch("backend.services.field_mapper.get_llm_client", return_value=FakeClient()), patch(
+            "backend.services.database.get_database", return_value=FakeDb()
+        ):
+            FieldMapper.map_fields(schema, UserProfile())
+
+        self.assertIn("VISIBLE PAGE TEXT FROM THIS APPLICATION STEP", captured["prompt"])
+        self.assertIn("Step 2 asks: Describe a time you improved a broken workflow.", captured["prompt"])
+        self.assertIn("nearby_page_text", captured["prompt"])
+        self.assertIn("Use the visible page text and nearby field text", captured["prompt"])

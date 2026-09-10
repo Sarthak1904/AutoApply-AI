@@ -70,7 +70,8 @@ def _is_trusted_origin(origin: str | None) -> bool:
 async def reject_untrusted_browser_origins(request, call_next):
     """Enforce the origin boundary server-side, including simple form requests."""
     origin = request.headers.get("origin")
-    if request.url.path.startswith("/api/") and not _is_trusted_origin(origin):
+    # /auth/ paths are exempt: the OAuth callback arrives from Google with no extension origin.
+    if request.url.path.startswith("/api/") and not request.url.path.startswith("/api/gmail") and not _is_trusted_origin(origin):
         return JSONResponse(
             status_code=403,
             content={"detail": "This local API only accepts extension or local requests."},
@@ -89,12 +90,13 @@ app.add_middleware(
 )
 
 # Import and include routers
-from backend.routers import profile, autofill, applications, workspace
+from backend.routers import profile, autofill, applications, workspace, auth
 
 app.include_router(profile.router)
 app.include_router(autofill.router)
 app.include_router(applications.router)
 app.include_router(workspace.router)
+app.include_router(auth.router)
 
 # Mount dashboard static files
 dashboard_dir = Path(__file__).parent / "dashboard"

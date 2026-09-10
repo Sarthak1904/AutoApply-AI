@@ -151,6 +151,23 @@ const AutoApplyUtils = (() => {
   }
 
   /**
+   * Classify a Workday page as 'login', 'signup', or 'application'.
+   * Returns null for non-Workday URLs.
+   * Used to prevent autofill from running on Workday auth pages.
+   * @param {string} url - Page URL
+   * @returns {'login'|'signup'|'application'|null}
+   */
+  function classifyWorkdayPage(url) {
+    if (!url) return null;
+    if (detectPlatform(url) !== 'workday') return null;
+    let pathname = '';
+    try { pathname = new URL(url).pathname.toLowerCase(); } catch (_) { return null; }
+    if (/\/(createaccount|register|signup)/i.test(pathname)) return 'signup';
+    if (/\/(signin|login|forgotpassword|forgot[-_]?password|resetpassword|reset[-_]?password)/i.test(pathname)) return 'login';
+    return 'application';
+  }
+
+  /**
    * Extract company name from URL or page title.
    * @param {string} url - Page URL
    * @param {string} title - Page title
@@ -203,7 +220,7 @@ const AutoApplyUtils = (() => {
       .replace(/'/g, '&#039;');
   }
 
-  return { API_BASE, apiCall, workspaceCall, debounce, generateId, detectPlatform, extractCompany, escapeHTML };
+  return { API_BASE, apiCall, workspaceCall, debounce, generateId, detectPlatform, classifyWorkdayPage, extractCompany, escapeHTML };
 })();
 
 // Make available globally for other content scripts

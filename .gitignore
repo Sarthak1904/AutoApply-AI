@@ -22,6 +22,9 @@ backend/data/knowledge.md
 backend/data/applications.json
 backend/data/corrections.json
 backend/data/answer_bank.json
+backend/data/gmail_credentials.json
+backend/data/gmail_token.json
+backend/data/workday_auth.json
 
 # IDE
 .vscode/

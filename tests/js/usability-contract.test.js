@@ -6,6 +6,7 @@ const root = path.resolve(__dirname, '..', '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
 const overlay = read('extension/content/overlay.js');
+const scraper = read('extension/content/scraper.js');
 const popup = read('extension/popup/popup.html');
 const popupLogic = read('extension/popup/popup.js');
 const batch = read('extension/popup/batch.js');
@@ -27,7 +28,20 @@ const visualSources = [
   dashboardLogo,
 ].join('\n').toLowerCase();
 
-assert.match(overlay, /Ready to prepare/);
+assert.match(overlay, /Start filling job/);
+assert.match(overlay, /Problem log/);
+assert.match(overlay, /autoapply_issue_log/);
+assert.match(overlay, /function recordIssue/);
+assert.match(overlay, /function startJobPagePromptWatcher/);
+assert.match(overlay, /page_text: pageText/);
+assert.match(overlay, /function detectGenericAuthStep/);
+assert.match(overlay, /function executeGenericAuthStep/);
+assert.match(overlay, /Continue sign in/);
+assert.match(overlay, /Sign in automatically/);
+assert.match(overlay, /autoapply_training_mode/);
+assert.match(overlay, /function startTrainingRecorder/);
+assert.match(overlay, /Train by watching/);
+assert.match(overlay, /\/teaches/);
 assert.match(overlay, /function undoLastFill/);
 assert.match(overlay, /review_required/);
 assert.match(overlay, /Open tracked application/);
@@ -43,6 +57,9 @@ assert.match(batch, /browser\.storage\.local/);
 assert.doesNotMatch(batch, /START_AUTOPILOT/);
 assert.match(background, /OPEN_WORKSPACE_RECORD/);
 assert.match(batch, /OPEN_WORKSPACE_RECORD/);
+assert.match(scraper, /extractVisiblePageText/);
+assert.match(scraper, /page_text: pageText/);
+assert.match(scraper, /context: extractFieldContext/);
 
 assert.match(dashboard, /\/api\/workspace\/opportunities\?limit=500/);
 assert.doesNotMatch(dashboard, /\/api\/applications\/\?limit=500/);

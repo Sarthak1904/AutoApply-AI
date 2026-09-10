@@ -119,6 +119,26 @@
 .autoapply-skill-tag.matched { color: #0f665d; background: #e0f3ef; border: 1px solid #a9d8d0; }
 .autoapply-skill-tag.missing { color: #9f3838; background: #fde8e6; border: 1px solid #efbbb5; }
 
+.autoapply-training-section { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 16px; background: #edf8f5; border-bottom: 1px solid #a9d8d0; }
+.autoapply-training-section strong { display: block; color: #0f665d; font-size: 11px; font-weight: 850; text-transform: uppercase; letter-spacing: .06em; }
+.autoapply-training-status { display: block; margin-top: 1px; color: var(--aa-muted); font-size: 11px; }
+.autoapply-training-toggle { flex: 0 0 auto; min-height: 30px; padding: 5px 10px; color: #0f665d; background: var(--aa-paper); border: 1px solid #a9d8d0; border-radius: 6px; font-size: 11px; font-weight: 800; cursor: pointer; }
+.autoapply-training-toggle:hover { color: var(--aa-cobalt); border-color: var(--aa-cobalt); }
+.autoapply-training-toggle.active { color: #fff; background: var(--aa-teal); border-color: var(--aa-teal); }
+
+.autoapply-log-section { flex-shrink: 0; background: #fff8ed; border-bottom: 1px solid #e7c98f; }
+.autoapply-log-section > summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 16px; color: #855100; cursor: pointer; list-style: none; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+.autoapply-log-section > summary::-webkit-details-marker { display: none; }
+.autoapply-log-section > summary b { display: grid; place-items: center; min-width: 22px; height: 20px; padding: 0 6px; color: #fff; background: var(--aa-amber); border-radius: 4px; font: 800 10px "SFMono-Regular",Consolas,monospace; }
+.autoapply-log-section ol { max-height: 140px; margin: 0; padding: 0 16px 10px; overflow-y: auto; list-style: none; }
+.autoapply-log-section li { padding: 8px 0; border-top: 1px solid rgba(173,106,0,.18); }
+.autoapply-log-empty { color: var(--aa-muted); font-size: 12px; }
+.autoapply-log-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 3px; color: #855100; font: 700 9px "SFMono-Regular",Consolas,monospace; text-transform: uppercase; }
+.autoapply-log-meta span { padding: 1px 5px; background: rgba(173,106,0,.1); border-radius: 3px; }
+.autoapply-log-message { color: var(--aa-ink); font-size: 12px; line-height: 1.35; word-break: break-word; }
+.autoapply-clear-log-btn { margin: 0 16px 12px; padding: 4px 0; color: #855100; background: transparent; border: 0; font-size: 11px; font-weight: 750; cursor: pointer; }
+.autoapply-clear-log-btn:hover { color: var(--aa-cobalt); }
+
 .autoapply-duplicate-warning { display: flex; flex-shrink: 0; align-items: center; gap: 6px; padding: 8px 16px; color: #855100; background: #fff5df; border-bottom: 1px solid #e7c98f; font-size: 12px; }
 .autoapply-step-indicator { flex-shrink: 0; padding: 8px 16px; color: var(--aa-muted); background: var(--aa-canvas); border-bottom: 1px solid var(--aa-line); font: 700 10px "SFMono-Regular", Consolas, monospace; text-transform: uppercase; letter-spacing: .07em; }
 
@@ -209,6 +229,44 @@
 .autoapply-choice-actions { display: grid; gap: 8px; margin-top: 16px; }
 .autoapply-empty-fields { padding: 26px 14px; color: var(--aa-muted); text-align: center; }
 
+/* ─── Workday auth notice (login / sign-up pages) ──────────────── */
+.autoapply-auth-notice {
+  padding: 24px 18px 22px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.autoapply-auth-icon { font-size: 38px; line-height: 1; margin-bottom: 2px; }
+.autoapply-auth-notice h2 { margin: 0; font-size: 15px; font-weight: 700; color: var(--aa-navy); }
+.autoapply-auth-notice p { margin: 0; font-size: 12px; line-height: 1.55; color: var(--aa-muted); }
+.autoapply-auth-note { font-size: 10.5px !important; opacity: 0.55; margin-top: 2px !important; }
+.autoapply-btn-success { background: #1e9e78 !important; color: #fff !important; cursor: default !important; }
+.autoapply-btn-success:hover { background: #1e9e78 !important; }
+.autoapply-auto-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(49, 87, 213, 0.12);
+  color: var(--aa-cobalt);
+  font-size: 10.5px;
+  font-weight: 750;
+  letter-spacing: 0.4px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1px solid rgba(49, 87, 213, 0.22);
+}
+.autoapply-pulse-indicator {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #1e9e78;
+  animation: autoapply-pulse-dot 1.4s ease-in-out infinite;
+}
+
+
 .autoapply-overlay button:focus-visible,
 .autoapply-overlay select:focus-visible,
 .autoapply-overlay input:focus-visible,
@@ -250,6 +308,7 @@
 .autoapply-overlay[data-theme="dark"] .autoapply-opportunity-heading .autoapply-kicker { color: #91a4ff; }
 .autoapply-overlay[data-theme="dark"] .autoapply-opportunity-heading .autoapply-prep-summary span { color: #bdc7d6; background: #121b2c; border-color: #40516c; }
 .autoapply-overlay[data-theme="dark"] .autoapply-duplicate-choice h2,
+.autoapply-overlay[data-theme="dark"] .autoapply-auth-notice h2,
 .autoapply-overlay[data-theme="dark"] .autoapply-btn-secondary,
 .autoapply-overlay[data-theme="dark"] .autoapply-more-actions > summary { color: var(--aa-ink); }
 .autoapply-overlay[data-theme="dark"] .autoapply-fit-section,
@@ -264,10 +323,23 @@
 .autoapply-overlay[data-theme="dark"] .autoapply-stop-btn { color: #271317 !important; }
 .autoapply-overlay[data-theme="dark"] .autoapply-skill-tag.matched,
 .autoapply-overlay[data-theme="dark"] .autoapply-status { color: #82d9ca; background: #17332f; border-color: #296257; }
+.autoapply-overlay[data-theme="dark"] .autoapply-training-section { background: #17332f; border-color: #296257; }
+.autoapply-overlay[data-theme="dark"] .autoapply-training-section strong,
+.autoapply-overlay[data-theme="dark"] .autoapply-training-status,
+.autoapply-overlay[data-theme="dark"] .autoapply-training-toggle { color: #82d9ca; }
+.autoapply-overlay[data-theme="dark"] .autoapply-training-toggle { background: #101720; border-color: #296257; }
+.autoapply-overlay[data-theme="dark"] .autoapply-training-toggle.active { color: #071512; background: #82d9ca; border-color: #82d9ca; }
 .autoapply-overlay[data-theme="dark"] .autoapply-skill-tag.missing,
 .autoapply-overlay[data-theme="dark"] .autoapply-status.error,
 .autoapply-overlay[data-theme="dark"] .autoapply-error { color: #f5a8ad; background: #38242b; border-color: #704047; }
 .autoapply-overlay[data-theme="dark"] .autoapply-duplicate-warning { color: #f2c97f; background: #302719; border-color: #715b35; }
+.autoapply-overlay[data-theme="dark"] .autoapply-log-section { background: #302719; border-color: #715b35; }
+.autoapply-overlay[data-theme="dark"] .autoapply-log-section > summary,
+.autoapply-overlay[data-theme="dark"] .autoapply-log-meta,
+.autoapply-overlay[data-theme="dark"] .autoapply-clear-log-btn { color: #f2c97f; }
+.autoapply-overlay[data-theme="dark"] .autoapply-log-message { color: var(--aa-ink); }
+.autoapply-overlay[data-theme="dark"] .autoapply-log-meta span { background: rgba(242,201,127,.12); }
+.autoapply-overlay[data-theme="dark"] .autoapply-log-section li { border-color: rgba(242,201,127,.16); }
 .autoapply-overlay[data-theme="dark"] button:focus-visible,
 .autoapply-overlay[data-theme="dark"] select:focus-visible,
 .autoapply-overlay[data-theme="dark"] input:focus-visible,
